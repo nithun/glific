@@ -96,7 +96,7 @@ oban_crontab = [
   {"* 20-23 * * *", Glific.Jobs.MinuteWorker, args: %{job: :daily_low_traffic_tasks}}
 ]
 
-{oban_engine, oban_plugins} =
+{oban_engine, oban_plugins, oban_queues} =
   if config_env() == :prod do
     {Oban.Pro.Engines.Smart,
      [
@@ -107,16 +107,26 @@ oban_crontab = [
        # only reprioritizing for gpt_webhook_queue for now
        {Oban.Pro.Plugins.DynamicPrioritizer,
         after: :infinity, queue_overrides: [gpt_webhook_queue: :timer.minutes(5)]}
-     ]}
+     ], oban_queues}
   else
     # free-Oban path (no Oban Pro license) for :dev / :test / :test_full — see
     # docs/architecture.md and the "if you don't have Oban pro license" comment above.
+    # The Basic engine rejects Pro-only queue options (rate_limit, local_limit,
+    # global_limit), so normalize every queue to a plain concurrency integer.
+    # (Test env never hits this — testing: :manual skips queue startup — but
+    # dev actually boots Oban.)
+    basic_queues =
+      Enum.map(oban_queues, fn
+        {name, limit} when is_integer(limit) -> {name, limit}
+        {name, opts} when is_list(opts) -> {name, opts[:limit] || opts[:local_limit] || 10}
+      end)
+
     {Oban.Engines.Basic,
      [
        {Oban.Plugins.Pruner, max_age: 5 * 60},
        {Oban.Plugins.Cron, crontab: oban_crontab},
        Oban.Plugins.Lifeline
-     ]}
+     ], basic_queues}
   end
 
 config :glific, Oban,
