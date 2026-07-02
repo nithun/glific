@@ -81,4 +81,23 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
       swiftchat_post(url, payload, credentials.api_key)
     end
   end
+
+  @doc """
+  Resolves an inbound SwiftChat media id to a downloadable URL.
+
+  Path confirmed from the official Postman collection:
+  `GET {URL}/bots/{Bot-ID}/media/{Media-ID}` with Bearer `{API-Key}` auth,
+  returning `{"url": "<presigned S3 URL>"}`. The presigned URL expires in
+  ~15 minutes (`X-Amz-Expires=900`) — see
+  `docs/prds/PRD-001-spike-notes.md` §4 in the planning repo. Callers must
+  resolve promptly (T-08 resolves at receive time, in the controller) —
+  do not cache/store this call's result for later reuse.
+  """
+  @spec get_media_url(non_neg_integer(), String.t()) :: Tesla.Env.result() | {:error, String.t()}
+  def get_media_url(org_id, media_id) do
+    with {:ok, credentials} <- get_credentials(org_id) do
+      url = @swiftchat_url <> "/bots/" <> credentials.bot_id <> "/media/" <> media_id
+      swiftchat_get(url, credentials.api_key)
+    end
+  end
 end

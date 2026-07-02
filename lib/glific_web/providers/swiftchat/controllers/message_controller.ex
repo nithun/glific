@@ -26,10 +26,13 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageController do
 
   use GlificWeb, :controller
 
+  require Logger
+
   alias Glific.{
     Communications,
     Contacts,
-    Providers.Swiftchat
+    Providers.Swiftchat,
+    Providers.Swiftchat.ApiClient
   }
 
   @doc false
@@ -79,6 +82,61 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageController do
   # not implemented here. Ack with 200 rather than drop/crash — SwiftChat's
   # retry behavior on non-200s is undocumented.
   def interactive(conn, params), do: handler(conn, params, "interactive handler (T-09 scope)")
+
+  @doc """
+  Parse an inbound SwiftChat media message payload (`image`, `document`,
+  `video`, `audio`) and convert it into a Glific message.
+
+  The webhook payload carries only a SwiftChat media id (no URL) — this
+  action resolves the id to a downloadable URL via
+  `ApiClient.get_media_url/2` (`GET /bots/{Bot-ID}/media/{Media-ID}`)
+  *before* calling `Swiftchat.Message.receive_media/1`, since the
+  normalizer itself has no access to org credentials. See
+  `Swiftchat.Message.receive_media/1`'s moduledoc for the full trade-off
+  writeup on the resolved URL's ~15-minute expiry.
+  """
+  @spec media(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def media(conn, params) do
+    organization_id = conn.assigns[:organization_id]
+    type = params["type"]
+    media_id = get_in(params, [type, "id"])
+
+    resolved_url = resolve_media_url(organization_id, media_id)
+
+    params
+    |> Map.put("resolved_url", resolved_url)
+    |> Swiftchat.Message.receive_media()
+    |> maybe_opt_in(organization_id)
+    |> update_message_params(organization_id)
+    |> Communications.Message.receive_message(media_type(type))
+
+    handler(conn, params, "media handler")
+  end
+
+  @spec media_type(String.t()) :: atom()
+  defp media_type("image"), do: :image
+  defp media_type("document"), do: :document
+  defp media_type("video"), do: :video
+  defp media_type("audio"), do: :audio
+  defp media_type(_type), do: :document
+
+  @spec resolve_media_url(non_neg_integer(), String.t() | nil) :: String.t() | nil
+  defp resolve_media_url(_organization_id, nil), do: nil
+
+  defp resolve_media_url(organization_id, media_id) do
+    case ApiClient.get_media_url(organization_id, media_id) do
+      {:ok, %Tesla.Env{status: status, body: body}} when status in 200..299 ->
+        decoded = if is_binary(body), do: Jason.decode!(body), else: body
+        decoded["url"]
+
+      error ->
+        Logger.error(
+          "SwiftChat: media URL resolution failed for media_id #{media_id}, org #{organization_id} — #{Glific.SafeLog.safe_inspect(error)}"
+        )
+
+        nil
+    end
+  end
 
   @spec maybe_opt_in(map(), non_neg_integer()) :: map()
   defp maybe_opt_in(message_payload, organization_id) do

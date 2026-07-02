@@ -161,17 +161,196 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
     end
   end
 
-  describe "unimplemented callbacks (T-08/T-09/T-10 scope, not built here)" do
-    test "send_image/2 fails loudly instead of guessing an unconfirmed payload shape", attrs do
+  describe "unimplemented callbacks (T-09/T-10 scope, not built here)" do
+    test "send_interactive/2 fails loudly instead of guessing an unconfirmed payload shape",
+         attrs do
       message = Fixtures.message_fixture(attrs)
-      assert {:error, error_msg} = Glific.Providers.Swiftchat.Message.send_image(message)
+      assert {:error, error_msg} = Glific.Providers.Swiftchat.Message.send_interactive(message)
       assert error_msg =~ "not implemented"
     end
+  end
 
-    test "receive_media/1 raises instead of silently normalizing an unconfirmed webhook shape" do
-      assert_raise RuntimeError, ~r/not implemented/, fn ->
-        Glific.Providers.Swiftchat.Message.receive_media(%{})
-      end
+  describe "media sends (T-08 scope): send_image/2, send_video/2, send_document/2, send_audio/2" do
+    # Builds a message with a media association attached (mirrors
+    # `Fixtures.message_media_fixture/1` + `message_fixture/1`, since
+    # neither fixture wires the two together and no existing Gupshup test
+    # does either — the media/message association has to be built by
+    # hand here).
+    @spec media_message_fixture(map(), atom(), String.t()) :: Glific.Messages.Message.t()
+    defp media_message_fixture(attrs, type, source_url) do
+      sender = Fixtures.contact_fixture(attrs)
+      receiver = Fixtures.contact_fixture(attrs)
+
+      message_media =
+        Fixtures.message_media_fixture(%{
+          organization_id: attrs.organization_id,
+          source_url: source_url,
+          url: source_url,
+          caption: "a caption"
+        })
+
+      message =
+        Fixtures.message_fixture(%{
+          organization_id: attrs.organization_id,
+          sender_id: sender.id,
+          receiver_id: receiver.id,
+          type: type,
+          media_id: message_media.id,
+          flow: :outbound
+        })
+
+      Repo.preload(message, [:media, :receiver], force: true)
+    end
+
+    @spec mock_media_send(non_neg_integer()) :: :ok
+    defp mock_media_send(content_length) do
+      Tesla.Mock.mock(fn
+        %{method: :post} ->
+          %Tesla.Env{status: 201, body: Jason.encode!(%{"id" => Ecto.UUID.generate()})}
+
+        %{method: :get} ->
+          %Tesla.Env{
+            status: 200,
+            headers: [{"content-length", Integer.to_string(content_length)}],
+            body: ""
+          }
+      end)
+    end
+
+    test "send_image/2 builds the confirmed image payload and enqueues the send", attrs do
+      message = media_message_fixture(attrs, :image, "https://example.com/photo.png")
+      mock_media_send(1024)
+
+      assert {:ok, _job} = Glific.Providers.Swiftchat.Message.send_image(message)
+      assert_enqueued(worker: Worker, prefix: attrs.global_schema)
+      Oban.drain_queue(queue: :swiftchat)
+
+      message = Messages.get_message!(message.id)
+      assert message.bsp_message_id != nil
+    end
+
+    test "send_video/2 builds the confirmed video payload (title, not body) and enqueues",
+         attrs do
+      message = media_message_fixture(attrs, :video, "https://example.com/clip.mp4")
+      mock_media_send(1024)
+
+      assert {:ok, _job} = Glific.Providers.Swiftchat.Message.send_video(message)
+      assert_enqueued(worker: Worker, prefix: attrs.global_schema)
+      Oban.drain_queue(queue: :swiftchat)
+
+      message = Messages.get_message!(message.id)
+      assert message.bsp_message_id != nil
+    end
+
+    test "send_document/2 builds the confirmed document payload (name + body) and enqueues",
+         attrs do
+      message = media_message_fixture(attrs, :document, "https://example.com/file.pdf")
+      mock_media_send(1024)
+
+      assert {:ok, _job} = Glific.Providers.Swiftchat.Message.send_document(message)
+      assert_enqueued(worker: Worker, prefix: attrs.global_schema)
+      Oban.drain_queue(queue: :swiftchat)
+
+      message = Messages.get_message!(message.id)
+      assert message.bsp_message_id != nil
+    end
+
+    test "send_audio/2 sends natively as type audio (no ADR-002 document fallback)", attrs do
+      message = media_message_fixture(attrs, :audio, "https://example.com/note.mp3")
+      mock_media_send(1024)
+
+      assert {:ok, _job} = Glific.Providers.Swiftchat.Message.send_audio(message)
+      assert_enqueued(worker: Worker, prefix: attrs.global_schema)
+      Oban.drain_queue(queue: :swiftchat)
+
+      message = Messages.get_message!(message.id)
+      assert message.bsp_message_id != nil
+    end
+
+    test "the outbound image payload shape matches the confirmed Postman body", attrs do
+      message = media_message_fixture(attrs, :image, "https://example.com/photo.png")
+      mock_media_send(1024)
+
+      assert {:ok, %Oban.Job{args: %{payload: payload}}} =
+               Glific.Providers.Swiftchat.Message.send_image(message)
+
+      assert payload["type"] == "image"
+      assert payload["image"]["url"] == "https://example.com/photo.png"
+      assert payload["image"]["body"] == "a caption"
+    end
+
+    test "the outbound video payload shape uses 'title', not 'body', for the caption", attrs do
+      message = media_message_fixture(attrs, :video, "https://example.com/clip.mp4")
+      mock_media_send(1024)
+
+      assert {:ok, %Oban.Job{args: %{payload: payload}}} =
+               Glific.Providers.Swiftchat.Message.send_video(message)
+
+      assert payload["type"] == "video"
+      assert payload["video"]["url"] == "https://example.com/clip.mp4"
+      assert payload["video"]["title"] == "a caption"
+      refute Map.has_key?(payload["video"], "body")
+    end
+
+    test "the outbound document payload shape carries both name and body", attrs do
+      message = media_message_fixture(attrs, :document, "https://example.com/file.pdf")
+      mock_media_send(1024)
+
+      assert {:ok, %Oban.Job{args: %{payload: payload}}} =
+               Glific.Providers.Swiftchat.Message.send_document(message)
+
+      assert payload["type"] == "document"
+      assert payload["document"]["url"] == "https://example.com/file.pdf"
+      assert payload["document"]["name"] == "a caption"
+      assert payload["document"]["body"] == "a caption"
+    end
+
+    test "the outbound audio payload shape carries both title and body", attrs do
+      message = media_message_fixture(attrs, :audio, "https://example.com/note.mp3")
+      mock_media_send(1024)
+
+      assert {:ok, %Oban.Job{args: %{payload: payload}}} =
+               Glific.Providers.Swiftchat.Message.send_audio(message)
+
+      assert payload["type"] == "audio"
+      assert payload["audio"]["url"] == "https://example.com/note.mp3"
+      assert payload["audio"]["title"] == "a caption"
+      assert payload["audio"]["body"] == "a caption"
+    end
+
+    test "send_sticker/2 falls back to image with a logged error (ADR-002)", attrs do
+      message = media_message_fixture(attrs, :sticker, "https://example.com/sticker.webp")
+      mock_media_send(1024)
+
+      assert {:ok, %Oban.Job{args: %{payload: payload}}} =
+               Glific.Providers.Swiftchat.Message.send_sticker(message)
+
+      assert payload["type"] == "image"
+      assert payload["image"]["url"] == "https://example.com/sticker.webp"
+    end
+
+    test "oversize media (> 64 MB) is rejected fast with a logged, user-visible error", attrs do
+      message = media_message_fixture(attrs, :image, "https://example.com/huge.png")
+      # 70 MB, over the 64 MB confirmed limit
+      mock_media_send(70 * 1024 * 1024)
+
+      assert {:error, error_msg} = Glific.Providers.Swiftchat.Message.send_image(message)
+      assert error_msg =~ "64 MB"
+      refute_enqueued(worker: Worker, prefix: attrs.global_schema)
+    end
+
+    test "media size check tolerates an unreachable size-check URL and still sends", attrs do
+      message = media_message_fixture(attrs, :image, "https://example.com/photo.png")
+
+      Tesla.Mock.mock(fn
+        %{method: :post} ->
+          %Tesla.Env{status: 201, body: Jason.encode!(%{"id" => Ecto.UUID.generate()})}
+
+        %{method: :get} ->
+          {:error, :timeout}
+      end)
+
+      assert {:ok, _job} = Glific.Providers.Swiftchat.Message.send_image(message)
     end
   end
 

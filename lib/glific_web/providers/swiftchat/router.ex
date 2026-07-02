@@ -12,6 +12,7 @@ defmodule GlificWeb.Providers.Swiftchat.Router do
     scope "/message" do
       post("/text", MessageController, :text)
       post("/interactive", MessageController, :interactive)
+      post("/media", MessageController, :media)
     end
 
     scope "/unknown" do

@@ -15,6 +15,10 @@ defmodule GlificWeb.Providers.Swiftchat.Plugs.Shunt do
   dropping the connection — SwiftChat's retry behavior on non-200s is
   unknown (residual T-01 question), so we never risk a retry storm on an
   unrecognized payload.
+
+  T-08: `image`/`document`/`video`/`audio` are routed to the media
+  message action. `media_list` (multi-media bundles) has no Glific
+  equivalent and stays in the catch-all, logged+acked only (T-09-or-later).
   """
 
   alias Plug.Conn
@@ -39,6 +43,7 @@ defmodule GlificWeb.Providers.Swiftchat.Plugs.Shunt do
 
   @text_types ~w(text)
   @interactive_types ~w(button_response multi_select_button_response persistent_menu_response)
+  @media_types ~w(image document video audio)
 
   @doc false
   @spec call(Plug.Conn.t(), Plug.opts()) :: Plug.Conn.t()
@@ -72,11 +77,26 @@ defmodule GlificWeb.Providers.Swiftchat.Plugs.Shunt do
   end
 
   @doc false
-  # Everything else — media types (T-08's job), message_rated, date,
-  # media_list, and any future/unknown `type` — is routed to the
-  # catch-all default handler, which always returns 200. We must not
-  # drop a non-200 for these: SwiftChat's retry behavior on failures is
-  # undocumented (residual T-01 question, Q3-adjacent).
+  def call(%Conn{params: %{"type" => type}} = conn, opts) when type in @media_types do
+    organization = build_context(conn)
+
+    path =
+      ["swiftchat"] ++
+        if Glific.safe_string_to_atom(organization.status) == :active,
+          do: ["message", "media"],
+          else: ["not_active"]
+
+    conn
+    |> change_path_info(path)
+    |> Router.call(opts)
+  end
+
+  @doc false
+  # Everything else — message_rated, date, media_list, and any
+  # future/unknown `type` — is routed to the catch-all default handler,
+  # which always returns 200. We must not drop a non-200 for these:
+  # SwiftChat's retry behavior on failures is undocumented (residual T-01
+  # question, Q3-adjacent).
   def call(%Conn{params: %{"type" => _type}} = conn, opts) do
     organization = build_context(conn)
 

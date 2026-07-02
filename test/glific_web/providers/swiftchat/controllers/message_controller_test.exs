@@ -11,6 +11,9 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
     Contacts,
     Contacts.Contact,
     Messages.Message,
+    Messages.MessageMedia,
+    Partners,
+    Partners.Provider,
     Repo
   }
 
@@ -149,21 +152,6 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
   end
 
   describe "unknown/unhandled payload types" do
-    test "media types (T-08 scope) get 200, not dropped", %{conn: conn} do
-      image_webhook = %{
-        "from" => "+919917443994",
-        "type" => "image",
-        "timestamp" => 1_707_216_634,
-        "message_id" => "swiftchat-msg-image",
-        "conversation_id" => "conv-1",
-        "conversation_initiated_by" => "user",
-        "image" => %{"id" => "media-id-1", "body" => "a caption", "content_type" => "image/png"}
-      }
-
-      conn = post(conn, "/swiftchat", image_webhook)
-      assert response(conn, 200) == ""
-    end
-
     test "message_rated events get 200, not dropped", %{conn: conn} do
       rated_webhook = %{
         "from" => "+919917443994",
@@ -243,6 +231,204 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
                  bsp_message_id: "swiftchat-msg-blocked",
                  organization_id: conn.assigns[:organization_id]
                })
+    end
+  end
+
+  describe "media (T-08): image/document/video/audio through the full controller path" do
+    # Activates the swiftchat credential so `ApiClient.get_media_url/2`
+    # has bot_id/api_key to resolve against — the ConnCase default BSP is
+    # gupshup, mirroring `Swiftchat.MessageTest`'s setup helper.
+    @spec activate_swiftchat(non_neg_integer()) :: :ok
+    defp activate_swiftchat(organization_id) do
+      {:ok, swiftchat_provider} = Repo.fetch_by(Provider, %{shortcode: "swiftchat"})
+
+      {:ok, _credential} =
+        Partners.create_credential(%{
+          organization_id: organization_id,
+          shortcode: "swiftchat",
+          keys: %{
+            handler: "Glific.Providers.Swiftchat.Message",
+            worker: "Glific.Providers.Swiftchat.Worker"
+          },
+          secrets: %{
+            "api_key" => "test_swiftchat_api_key",
+            "bot_id" => "test_bot_id",
+            "merchant_id" => "test_merchant_id"
+          },
+          is_active: true
+        })
+
+      organization = Partners.get_organization!(organization_id)
+      Partners.update_organization(organization, %{bsp_id: swiftchat_provider.id})
+
+      organization = Partners.get_organization!(organization_id)
+      Partners.remove_organization_cache(organization.id, organization.shortcode)
+      Partners.fill_cache(organization)
+      :ok
+    end
+
+    @image_webhook %{
+      "from" => "+919917443994",
+      "type" => "image",
+      "timestamp" => 1_707_216_634,
+      "message_id" => "swiftchat-msg-image",
+      "conversation_id" => "conv-1",
+      "conversation_initiated_by" => "user",
+      "image" => %{"id" => "media-id-1", "body" => "a caption", "content_type" => "image/png"}
+    }
+
+    @document_webhook %{
+      "from" => "+919917443994",
+      "type" => "document",
+      "timestamp" => 1_707_216_634,
+      "message_id" => "swiftchat-msg-document",
+      "conversation_id" => "conv-1",
+      "conversation_initiated_by" => "user",
+      "document" => %{
+        "id" => "media-id-2",
+        "name" => "report.pdf",
+        "body" => "a report",
+        "content_type" => "application/pdf"
+      }
+    }
+
+    @video_webhook %{
+      "from" => "+919917443994",
+      "type" => "video",
+      "timestamp" => 1_707_216_634,
+      "message_id" => "swiftchat-msg-video",
+      "conversation_id" => "conv-1",
+      "conversation_initiated_by" => "user",
+      "video" => %{"id" => "media-id-3", "title" => "a clip", "content_type" => "video/mp4"}
+    }
+
+    @audio_webhook %{
+      "from" => "+919917443994",
+      "type" => "audio",
+      "timestamp" => 1_707_216_634,
+      "message_id" => "swiftchat-msg-audio",
+      "conversation_id" => "conv-1",
+      "conversation_initiated_by" => "user",
+      "audio" => %{
+        "id" => "media-id-4",
+        "title" => "a note",
+        "body" => "a voice note",
+        "content_type" => "audio/mpeg"
+      }
+    }
+
+    @spec mock_media_url_resolution(String.t()) :: :ok
+    defp mock_media_url_resolution(resolved_url) do
+      Tesla.Mock.mock(fn
+        %{method: :get} ->
+          %Tesla.Env{status: 200, body: Jason.encode!(%{"url" => resolved_url})}
+      end)
+    end
+
+    test "inbound image resolves the media id to a URL and stores the message + media",
+         %{conn: conn, organization_id: organization_id} do
+      :ok = activate_swiftchat(organization_id)
+      mock_media_url_resolution("https://s3.example.com/presigned-image?X-Amz-Expires=900")
+
+      conn = post(conn, "/swiftchat", @image_webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-image",
+          organization_id: organization_id
+        })
+
+      message = Repo.preload(message, [:media, :sender])
+      assert message.type == :image
+      assert message.sender.phone == "+919917443994"
+      assert message.media.url == "https://s3.example.com/presigned-image?X-Amz-Expires=900"
+      assert message.media.source_url == message.media.url
+      assert message.media.caption == "a caption"
+      assert message.media.content_type == "image/png"
+    end
+
+    test "inbound document resolves the media id and stores name/caption in the media caption",
+         %{conn: conn, organization_id: organization_id} do
+      :ok = activate_swiftchat(organization_id)
+      mock_media_url_resolution("https://s3.example.com/presigned-document")
+
+      conn = post(conn, "/swiftchat", @document_webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-document",
+          organization_id: organization_id
+        })
+
+      message = Repo.preload(message, :media)
+      assert message.type == :document
+      assert message.media.caption == "a report"
+      assert message.media.content_type == "application/pdf"
+    end
+
+    test "inbound video resolves the media id and falls back to the title as caption",
+         %{conn: conn, organization_id: organization_id} do
+      :ok = activate_swiftchat(organization_id)
+      mock_media_url_resolution("https://s3.example.com/presigned-video")
+
+      conn = post(conn, "/swiftchat", @video_webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-video",
+          organization_id: organization_id
+        })
+
+      message = Repo.preload(message, :media)
+      assert message.type == :video
+      assert message.media.caption == "a clip"
+    end
+
+    test "inbound audio resolves the media id and stores natively as type audio",
+         %{conn: conn, organization_id: organization_id} do
+      :ok = activate_swiftchat(organization_id)
+      mock_media_url_resolution("https://s3.example.com/presigned-audio")
+
+      conn = post(conn, "/swiftchat", @audio_webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-audio",
+          organization_id: organization_id
+        })
+
+      message = Repo.preload(message, :media)
+      assert message.type == :audio
+      assert message.media.caption == "a voice note"
+    end
+
+    test "media-URL resolution failure still stores the message, with a sentinel media URL",
+         %{conn: conn, organization_id: organization_id} do
+      :ok = activate_swiftchat(organization_id)
+
+      Tesla.Mock.mock(fn
+        %{method: :get} -> {:error, :timeout}
+      end)
+
+      webhook = Map.put(@image_webhook, "message_id", "swiftchat-msg-image-unresolvable")
+
+      conn = post(conn, "/swiftchat", webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-image-unresolvable",
+          organization_id: organization_id
+        })
+
+      message = Repo.preload(message, :media)
+      assert %MessageMedia{} = message.media
+      assert message.media.url == "unresolved://media-id-1"
+      assert message.media.source_url == "unresolved://media-id-1"
     end
   end
 end

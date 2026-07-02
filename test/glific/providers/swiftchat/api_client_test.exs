@@ -105,4 +105,66 @@ defmodule Glific.Providers.Swiftchat.ApiClientTest do
       assert error_msg =~ "API Key and Bot ID"
     end
   end
+
+  describe "get_media_url/2 (T-08: inbound media-id -> presigned URL resolution)" do
+    @spec activate_swiftchat(non_neg_integer()) :: :ok
+    defp activate_swiftchat(organization_id) do
+      {:ok, swiftchat_provider} = Repo.fetch_by(Provider, %{shortcode: "swiftchat"})
+
+      {:ok, _credential} =
+        Partners.create_credential(%{
+          organization_id: organization_id,
+          shortcode: "swiftchat",
+          keys: %{
+            handler: "Glific.Providers.Swiftchat.Message",
+            worker: "Glific.Providers.Swiftchat.Worker"
+          },
+          secrets: %{
+            "api_key" => "test_swiftchat_api_key",
+            "bot_id" => "test_bot_id",
+            "merchant_id" => "test_merchant_id"
+          },
+          is_active: true
+        })
+
+      organization = Partners.get_organization!(organization_id)
+      Partners.update_organization(organization, %{bsp_id: swiftchat_provider.id})
+
+      organization = Partners.get_organization!(organization_id)
+      Partners.remove_organization_cache(organization.id, organization.shortcode)
+      Partners.fill_cache(organization)
+      :ok
+    end
+
+    test "resolves the bot-scoped media endpoint with a Bearer token header and returns the presigned URL",
+         attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn
+        %{method: :get, url: url, headers: headers} ->
+          assert url == "https://v1-api.swiftchat.ai/api/bots/test_bot_id/media/media-id-1"
+          assert {"authorization", "Bearer test_swiftchat_api_key"} in headers
+
+          %Tesla.Env{
+            status: 200,
+            body:
+              Jason.encode!(%{
+                "url" => "https://s3.example.com/presigned?X-Amz-Expires=900"
+              })
+          }
+      end)
+
+      assert {:ok, %Tesla.Env{status: 200, body: body}} =
+               ApiClient.get_media_url(attrs.organization_id, "media-id-1")
+
+      assert Jason.decode!(body)["url"] =~ "s3.example.com"
+    end
+
+    test "returns a credential error when no swiftchat credential is active", attrs do
+      assert {:error, error_msg} =
+               ApiClient.get_media_url(attrs.organization_id, "media-id-1")
+
+      assert error_msg =~ "API Key and Bot ID"
+    end
+  end
 end
