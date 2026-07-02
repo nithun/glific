@@ -2,22 +2,23 @@ defmodule Glific.Providers.Swiftchat.Message do
   @moduledoc """
   Message API layer between application and SwiftChat.
 
-  Implemented so far: `send_text/2` (T-04), `receive_text/1` (T-05),
-  media send/receive (T-08: `send_image/2`, `send_video/2`,
-  `send_document/2`, `send_audio/2`, `receive_media/1`), interactive
-  send/receive (T-09: `send_interactive/2` for `quick_reply`/`list`,
-  `receive_interactive/1` for `button_response` /
-  `multi_select_button_response` / `persistent_menu_response`). Template
-  sends are the remaining later task (T-10) — each unimplemented callback
-  fails loudly (logged error or raise) rather than silently building a
-  wrong payload against an unconfirmed endpoint shape.
+  Implemented so far: `send_text/2` (T-04, and its HSM/template branch as
+  of T-10), `receive_text/1` (T-05), media send/receive (T-08:
+  `send_image/2`, `send_video/2`, `send_document/2`, `send_audio/2`,
+  `receive_media/1`), interactive send/receive (T-09: `send_interactive/2`
+  for `quick_reply`/`list`, `receive_interactive/1` for `button_response` /
+  `multi_select_button_response` / `persistent_menu_response`). Each
+  otherwise-unimplemented callback fails loudly (logged error or raise)
+  rather than silently building a wrong payload against an unconfirmed
+  endpoint shape.
   """
 
   @behaviour Glific.Providers.MessageBehaviour
 
   alias Glific.{
     Communications,
-    Messages.Message
+    Messages.Message,
+    Repo
   }
 
   import Ecto.Query, warn: false
@@ -36,18 +37,96 @@ defmodule Glific.Providers.Swiftchat.Message do
   `to` is the recipient's real mobile number — confirming ADR-001's
   primary branch. Outbound needs no SwiftChat-side user id at all;
   `contact.phone` is the destination, exactly like Gupshup.
+
+  **HSM/template branch (T-10, ADR-005 phase 1):** `Communications.Message.send_message/2`
+  dispatches every `:text`-typed message here regardless of `is_hsm`
+  (`@type_to_token` in `lib/glific/communications/message.ex` maps
+  `text: :send_text` unconditionally — mirrors Gupshup's `send_text/2`,
+  which likewise receives `attrs[:is_hsm]` rather than being routed to a
+  separate template callback; `MessageBehaviour` defines no
+  `send_template/2`). When `attrs[:is_hsm]` is true, we build the
+  confirmed template-send body instead of the plain-text body:
+
+      {"to": "...", "type": "template",
+       "template": {"name": "<bsp_id>", "parameters": [<positional...>]}}
+
+  per `docs/prds/PRD-001-spike-notes.md`'s "Templates" bonus finding and
+  ADR-005: SwiftChat templates are created per-merchant and keyed by
+  **name**, not a numeric id, so phase 1's manual mapping stores the
+  template name in `SessionTemplate.bsp_id` — the seed helper
+  (`Glific.Scripts.SwiftchatTemplates`) is what populates it. `attrs`
+  carries `template_id`/`params` set by
+  `Glific.Messages.hsm_message_params/3` (`lib/glific/messages.ex`); we
+  need the session template's `bsp_id`, so unlike Gupshup (which reuses
+  `attrs[:template_uuid]`, itself set to `session_template.uuid` at
+  approval time and never fetched again here) we look the template row up
+  by `attrs[:template_id]` to read `bsp_id` directly — `attrs` alone does
+  not carry it.
   """
   @impl Glific.Providers.MessageBehaviour
   @spec send_text(Message.t(), map()) ::
           {:ok, Oban.Job.t()} | {:error, Ecto.Changeset.t()} | {:error, String.t()}
   def send_text(message, attrs \\ %{}) do
-    %{
-      "type" => "text",
-      "text" => %{"body" => message.body}
-    }
-    |> check_size(message.body)
-    |> put_destination(message)
-    |> send_message(message, attrs)
+    if Map.get(attrs, :is_hsm, false) do
+      send_hsm_text(message, attrs)
+    else
+      %{
+        "type" => "text",
+        "text" => %{"body" => message.body}
+      }
+      |> check_size(message.body)
+      |> put_destination(message)
+      |> send_message(message, attrs)
+    end
+  end
+
+  # Builds the confirmed SwiftChat template-send payload (ADR-005 phase 1,
+  # T-10). `attrs[:template_id]` is the Glific `session_templates.id` set
+  # by `Glific.Messages.hsm_message_params/3`; `attrs[:params]` is the
+  # already-parsed (contact-var-substituted) positional parameter list —
+  # `Messages.check_for_hsm_message/2` renames the caller's `:params` key
+  # to `:parameters` before calling `create_and_send_hsm_message/1`, but
+  # `hsm_message_params/3` puts the final list back under `:params` for
+  # the provider layer (mirrors Gupshup's `attrs[:params]` usage in
+  # `Gupshup.Worker.process_gupshup/4`).
+  @spec send_hsm_text(Message.t(), map()) ::
+          {:ok, Oban.Job.t()} | {:error, Ecto.Changeset.t()} | {:error, String.t()}
+  defp send_hsm_text(message, attrs) do
+    template_id = Map.get(attrs, :template_id)
+    parameters = Map.get(attrs, :params, []) || []
+
+    case fetch_template_bsp_id(template_id) do
+      {:ok, bsp_id} ->
+        %{
+          "type" => "template",
+          "template" => %{
+            "name" => bsp_id,
+            "parameters" => parameters
+          }
+        }
+        |> put_destination(message)
+        |> send_message(message, attrs)
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  @spec fetch_template_bsp_id(non_neg_integer() | nil) :: {:ok, String.t()} | {:error, String.t()}
+  defp fetch_template_bsp_id(nil), do: {:error, "SwiftChat HSM send is missing a template_id"}
+
+  defp fetch_template_bsp_id(template_id) do
+    case Repo.fetch(Glific.Templates.SessionTemplate, template_id) do
+      {:ok, %{bsp_id: bsp_id}} when is_binary(bsp_id) and bsp_id != "" ->
+        {:ok, bsp_id}
+
+      {:ok, _template} ->
+        {:error,
+         "SwiftChat template id #{template_id} has no bsp_id set — run the T-10 seed helper (Glific.Scripts.SwiftchatTemplates) first"}
+
+      {:error, _reason} ->
+        {:error, "SwiftChat HSM send: template id #{template_id} not found"}
+    end
   end
 
   @doc """

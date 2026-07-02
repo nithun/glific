@@ -21,7 +21,8 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
     Partners,
     Partners.Provider,
     Providers.Swiftchat.Worker,
-    Repo
+    Repo,
+    Scripts.SwiftchatTemplates
   }
 
   setup %{organization_id: organization_id} = attrs do
@@ -671,6 +672,166 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
 
       assert %{body: "Talk to a human"} =
                Glific.Providers.Swiftchat.Message.receive_interactive(payload)
+    end
+  end
+
+  describe "send_text/2 HSM/template branch (T-10, ADR-005 phase 1)" do
+    @spec approved_swiftchat_template(non_neg_integer(), String.t()) ::
+            Glific.Templates.SessionTemplate.t()
+    defp approved_swiftchat_template(organization_id, template_name) do
+      {:ok, session_template} =
+        SwiftchatTemplates.upsert_template(
+          organization_id,
+          template_name,
+          "Order Confirmation",
+          "Hi {{1}}, your order {{2}} has shipped.",
+          2
+        )
+
+      session_template
+    end
+
+    test "builds the confirmed template payload (name from bsp_id, positional params)", attrs do
+      session_template = approved_swiftchat_template(attrs.organization_id, "order_confirmation")
+      contact = Fixtures.contact_fixture(attrs)
+
+      message =
+        Fixtures.message_fixture(%{
+          organization_id: attrs.organization_id,
+          sender_id: Partners.organization_contact_id(attrs.organization_id),
+          receiver_id: contact.id,
+          type: :text,
+          is_hsm: true,
+          flow: :outbound
+        })
+        |> Repo.preload([:receiver], force: true)
+
+      assert {:ok, %Oban.Job{args: %{payload: payload}}} =
+               Glific.Providers.Swiftchat.Message.send_text(message, %{
+                 is_hsm: true,
+                 template_id: session_template.id,
+                 params: ["Priya", "ORD-123"]
+               })
+
+      assert payload["type"] == "template"
+      assert payload["template"]["name"] == "order_confirmation"
+      assert payload["template"]["parameters"] == ["Priya", "ORD-123"]
+      assert payload["to"] == contact.phone
+
+      assert_enqueued(worker: Worker, prefix: attrs.global_schema)
+      Oban.drain_queue(queue: :swiftchat)
+
+      message = Messages.get_message!(message.id)
+      assert message.bsp_message_id != nil
+      assert message.bsp_status == :enqueued
+    end
+
+    test "errors when the template row has no bsp_id set (seed helper not run yet)", attrs do
+      language = Fixtures.language_fixture()
+
+      {:ok, unmapped_template} =
+        Glific.Templates.do_create_session_template(%{
+          label: "Unmapped Template",
+          shortcode: "unmapped_template",
+          body: "Hi {{1}}",
+          type: :text,
+          is_hsm: true,
+          status: "APPROVED",
+          number_parameters: 1,
+          language_id: language.id,
+          organization_id: attrs.organization_id
+        })
+
+      contact = Fixtures.contact_fixture(attrs)
+
+      message =
+        Fixtures.message_fixture(%{
+          organization_id: attrs.organization_id,
+          sender_id: Partners.organization_contact_id(attrs.organization_id),
+          receiver_id: contact.id,
+          type: :text,
+          is_hsm: true,
+          flow: :outbound
+        })
+        |> Repo.preload([:receiver], force: true)
+
+      assert {:error, error_msg} =
+               Glific.Providers.Swiftchat.Message.send_text(message, %{
+                 is_hsm: true,
+                 template_id: unmapped_template.id,
+                 params: ["Priya"]
+               })
+
+      assert error_msg =~ "no bsp_id set"
+      refute_enqueued(worker: Worker, prefix: attrs.global_schema)
+    end
+
+    test "errors when template_id is missing from attrs", attrs do
+      contact = Fixtures.contact_fixture(attrs)
+
+      message =
+        Fixtures.message_fixture(%{
+          organization_id: attrs.organization_id,
+          sender_id: Partners.organization_contact_id(attrs.organization_id),
+          receiver_id: contact.id,
+          type: :text,
+          is_hsm: true,
+          flow: :outbound
+        })
+        |> Repo.preload([:receiver], force: true)
+
+      assert {:error, error_msg} =
+               Glific.Providers.Swiftchat.Message.send_text(message, %{is_hsm: true, params: []})
+
+      assert error_msg =~ "missing a template_id"
+    end
+
+    test "end-to-end via Messages.create_and_send_hsm_message/1 (HSM gating enforced, no SwiftChat-specific code)",
+         attrs do
+      session_template = approved_swiftchat_template(attrs.organization_id, "order_confirmation")
+      # bsp_status: :session_and_hsm + optin_time set by the default contact
+      # fixture — Contacts.can_send_message_to?/2's existing, provider-agnostic
+      # gate (lib/glific/contacts.ex) allows this HSM send with zero
+      # SwiftChat-specific gating code.
+      contact = Fixtures.contact_fixture(attrs)
+
+      assert {:ok, message} =
+               %{
+                 template_id: session_template.id,
+                 receiver_id: contact.id,
+                 parameters: ["Priya", "ORD-123"]
+               }
+               |> Messages.create_and_send_hsm_message()
+
+      assert_enqueued(worker: Worker, prefix: attrs.global_schema)
+      Oban.drain_queue(queue: :swiftchat)
+
+      message = Messages.get_message!(message.id)
+      assert message.is_hsm == true
+      assert message.flow == :outbound
+      assert message.bsp_message_id != nil
+      assert message.bsp_status == :enqueued
+    end
+
+    test "HSM gating blocks a send to a contact with no active session/opt-in (provider-agnostic gate)",
+         attrs do
+      session_template = approved_swiftchat_template(attrs.organization_id, "order_confirmation")
+
+      contact =
+        Fixtures.contact_fixture(
+          Map.merge(attrs, %{bsp_status: :none, optin_time: nil, optin_status: false})
+        )
+
+      assert {:error, error_message} =
+               %{
+                 template_id: session_template.id,
+                 receiver_id: contact.id,
+                 parameters: ["Priya", "ORD-123"]
+               }
+               |> Messages.create_and_send_hsm_message()
+
+      assert error_message =~ "invalid BSP status"
+      refute_enqueued(worker: Worker, prefix: attrs.global_schema)
     end
   end
 end
