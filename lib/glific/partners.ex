@@ -987,6 +987,18 @@ defmodule Glific.Partners do
         non_nil_string(secrets["two_way_user_id"]) &&
         non_nil_string(secrets["two_way_password"])
 
+  # Matches the secrets shape seeded in
+  # priv/repo/seeds/20260702000001_add_swiftchat_provider.exs (`api_key`,
+  # `bot_id`, `merchant_id`) — required so `valid_bsp?/1` (and therefore
+  # the `credential_update_callback/3` "swiftchat" clause below) actually
+  # fires; without this clause every swiftchat credential update was
+  # silently a no-op (`validate_secrets?/2`'s catch-all returns `false`).
+  defp validate_secrets?(secrets, "swiftchat"),
+    do:
+      non_nil_string(secrets["api_key"]) &&
+        non_nil_string(secrets["bot_id"]) &&
+        non_nil_string(secrets["merchant_id"])
+
   defp validate_secrets?(_secrets, _bsp),
     do: false
 
@@ -1121,6 +1133,22 @@ defmodule Glific.Partners do
   end
 
   defp credential_update_callback(organization, credential, "gupshup_enterprise") do
+    if valid_bsp?(credential) do
+      update_organization(organization, %{bsp_id: credential.provider.id})
+    end
+
+    {:ok, credential}
+  end
+
+  # SwiftChat is a keys-driven BSP (handler/worker resolved from the
+  # Provider row's `keys`, lesson L-005) with no partner-verification API
+  # of its own in phase 1 (ADR-005) — mirrors the minimal
+  # "gupshup_enterprise" shape: validate the required secrets are present
+  # (`validate_secrets?/2` "swiftchat" clause above) and set
+  # `organization.bsp_id` so the org becomes selectable end-to-end through
+  # Settings -> Integrations. No remote credential-verification call
+  # exists to make (unlike Gupshup's `verify_gupshup_credentials/2`).
+  defp credential_update_callback(organization, credential, "swiftchat") do
     if valid_bsp?(credential) do
       update_organization(organization, %{bsp_id: credential.provider.id})
     end

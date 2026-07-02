@@ -75,6 +75,7 @@ defmodule Glific.Partners.Provider do
     |> case do
       "gupshup" -> Glific.Providers.Gupshup.Template
       "gupshup_enterprise" -> Glific.Providers.GupshupEnterprise.Template
+      "swiftchat" -> Glific.Providers.Swiftchat.Template
       _ -> raise("#{organization.bsp.shortcode} Provider Not found.")
     end
     |> Code.ensure_loaded!()
@@ -87,19 +88,36 @@ defmodule Glific.Partners.Provider do
     |> case do
       "gupshup" -> Glific.Providers.GupshupContacts
       "gupshup_enterprise" -> Glific.Providers.GupshupEnterpriseContacts
+      "swiftchat" -> Glific.Providers.SwiftchatContacts
       _ -> raise("#{organization.bsp.shortcode} Provider Not found.")
     end
     |> Code.ensure_loaded!()
   end
 
+  # No current call site invokes bsp_module/2 with any tag other than
+  # :template/:contact (grepped: every `Provider.bsp_module(` call in
+  # lib/ passes one of those two explicitly) — this catch-all clause is
+  # unreachable dispatch today. Left raising deliberately (not stubbed)
+  # so an actual future caller that hits it fails loudly with a clear
+  # message naming the gap, rather than silently returning a module that
+  # doesn't implement whatever behaviour that future caller expects.
   def bsp_module(org_id, _) do
     organization = Glific.Partners.organization(org_id)
 
     organization.bsp.shortcode
     |> case do
-      "gupshup" -> Glific.Providers.Gupshup
-      "gupshup_enterprise" -> Glific.Providers.GupshupEnterprise
-      _ -> raise("#{organization.bsp.shortcode} Provider Not found.")
+      "gupshup" ->
+        Glific.Providers.Gupshup
+
+      "gupshup_enterprise" ->
+        Glific.Providers.GupshupEnterprise
+
+      _ ->
+        raise(
+          "#{organization.bsp.shortcode} Provider Not found for bsp_module/2's default tag " <>
+            "(no swiftchat clause here — this catch-all has no known caller today; if you're " <>
+            "adding one, add a Glific.Providers.Swiftchat module of the shape it expects first)."
+        )
     end
     |> Code.ensure_loaded!()
   end
