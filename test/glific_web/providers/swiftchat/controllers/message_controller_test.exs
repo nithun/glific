@@ -10,10 +10,12 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
   alias Glific.{
     Contacts,
     Contacts.Contact,
+    Flows.FlowContext,
     Messages.Message,
     Messages.MessageMedia,
     Partners,
     Partners.Provider,
+    Processor.ConsumerFlow,
     Repo
   }
 
@@ -523,6 +525,65 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
       assert %MessageMedia{} = message.media
       assert message.media.url == "unresolved://media-id-1"
       assert message.media.source_url == "unresolved://media-id-1"
+    end
+  end
+
+  describe "flow advancement (T-05/T-09 AC: inbound reply advances a flow)" do
+    @flow_keyword_webhook %{
+      "from" => "+919917443995",
+      "type" => "text",
+      "timestamp" => 1_707_216_999,
+      "message_id" => "swiftchat-msg-flow-1",
+      "conversation_id" => "conv-flow-1",
+      "conversation_initiated_by" => "user",
+      "text" => %{"body" => "help"}
+    }
+
+    test "an inbound SwiftChat text reply that matches a flow keyword starts and advances the flow",
+         %{conn: conn, organization_id: organization_id} do
+      # "help" is a real, active trigger keyword seeded for org 1 (the
+      # "Help Workflow" flow — confirmed via
+      # `Glific.Flows.flow_keywords_map(1)["published"]`), and is the
+      # same keyword `test/glific/processor/consumer_flow_test.exs`'s
+      # "should start the flow" test drives through
+      # `ConsumerFlow.process_message/2` directly (its `@checks` fixture,
+      # index 0). Mirrored here through the real SwiftChat webhook plug
+      # path instead of `Fixtures.message_fixture/1`, since T-05's AC is
+      # specifically about the SwiftChat inbound path advancing a flow.
+      conn = post(conn, "/swiftchat", @flow_keyword_webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-flow-1",
+          organization_id: organization_id
+        })
+
+      contact_id = message.contact_id
+
+      # confirm no flow is active yet for this brand-new contact
+      refute FlowContext.active_context(contact_id)
+
+      message = Repo.preload(message, [:location, :media, :whatsapp_form_response, :contact])
+      state = ConsumerFlow.load_state(organization_id)
+
+      # drive the flow-execution step directly, the same way
+      # `Processor.ConsumerWorker`'s GenServer does asynchronously in
+      # production (see `consumer_worker.ex:process_message/2`) — tests
+      # call this synchronously so the assertion isn't racing GenStage.
+      ConsumerFlow.process_message({message, state}, message.body)
+
+      flow_context = FlowContext.active_context(contact_id)
+
+      # the flow genuinely started and advanced past its entry node for
+      # this contact — a real FlowContext row now exists, scoped to this
+      # contact, with a node_uuid placing it inside the flow's node graph
+      # (not merely that an inbound Message row got persisted, which the
+      # `message.flow == :inbound` assertions elsewhere in this file
+      # already cover and which is a different field entirely).
+      assert %FlowContext{} = flow_context
+      assert flow_context.contact_id == contact_id
+      assert flow_context.node_uuid != nil
     end
   end
 end

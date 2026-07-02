@@ -64,6 +64,26 @@ defmodule Glific.Providers.Swiftchat.ResponseHandlerTest do
       assert updated_message.bsp_status == :error
     end
 
+    test "server error (5xx HTTP response) marks the message as errored and triggers an Oban retry",
+         attrs do
+      message = Fixtures.message_fixture(attrs)
+
+      # a genuine `{:ok, %Tesla.Env{status: 500}}` HTTP response (as opposed
+      # to a transport-level `{:error, ...}` failure) falls through to the
+      # `_ ->` clause, mirroring Gupshup's response_handler.ex line-for-line:
+      # handle_error_response/2 always returns `{:error, response.body}`, so
+      # this is a non-:ok, retry-triggering result — Oban will retry the job.
+      response = %Tesla.Env{
+        status: 500,
+        body: Jason.encode!(%{"error" => "Internal Server Error"})
+      }
+
+      assert {:error, _reason} = ResponseHandler.handle_response({:ok, response}, message)
+
+      updated_message = Messages.get_message!(message.id)
+      assert updated_message.bsp_status == :error
+    end
+
     test "a raw Tesla error term never leaks a bearer token in the logged error body",
          attrs do
       message = Fixtures.message_fixture(attrs)
