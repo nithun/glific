@@ -92,17 +92,28 @@ oban_crontab = [
   {"* 20-23 * * *", Glific.Jobs.MinuteWorker, args: %{job: :daily_low_traffic_tasks}}
 ]
 
-oban_engine = Oban.Pro.Engines.Smart
-
-oban_plugins = [
-  # Prune jobs after 5 mins, gives us some time to go investigate if needed
-  {Oban.Pro.Plugins.DynamicPruner, mode: {:max_age, 5 * 60}, limit: 25_000},
-  {Oban.Plugins.Cron, crontab: oban_crontab},
-  Oban.Pro.Plugins.DynamicLifeline,
-  # only reprioritizing for gpt_webhook_queue for now
-  {Oban.Pro.Plugins.DynamicPrioritizer,
-   after: :infinity, queue_overrides: [gpt_webhook_queue: :timer.minutes(5)]}
-]
+{oban_engine, oban_plugins} =
+  if config_env() == :prod do
+    {Oban.Pro.Engines.Smart,
+     [
+       # Prune jobs after 5 mins, gives us some time to go investigate if needed
+       {Oban.Pro.Plugins.DynamicPruner, mode: {:max_age, 5 * 60}, limit: 25_000},
+       {Oban.Plugins.Cron, crontab: oban_crontab},
+       Oban.Pro.Plugins.DynamicLifeline,
+       # only reprioritizing for gpt_webhook_queue for now
+       {Oban.Pro.Plugins.DynamicPrioritizer,
+        after: :infinity, queue_overrides: [gpt_webhook_queue: :timer.minutes(5)]}
+     ]}
+  else
+    # free-Oban path (no Oban Pro license) for :dev / :test / :test_full — see
+    # docs/architecture.md and the "if you don't have Oban pro license" comment above.
+    {Oban.Engines.Basic,
+     [
+       {Oban.Plugins.Pruner, max_age: 5 * 60},
+       {Oban.Plugins.Cron, crontab: oban_crontab},
+       Oban.Plugins.Lifeline
+     ]}
+  end
 
 config :glific, Oban,
   prefix: "global",
