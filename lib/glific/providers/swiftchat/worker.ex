@@ -18,11 +18,12 @@ defmodule Glific.Providers.Swiftchat.Worker do
     Repo
   }
 
-  # TODO(T-01): SwiftChat's real per-organization send-rate limit is
-  # unknown (PRD-001-tasks Open Questions Q2). `bsp_limit` is not yet
-  # seeded on the swiftchat Provider row's `keys` (unlike Gupshup's
-  # `keys["bsp_limit"]`), so this mirrors Maytapi's fallback-constant
-  # pattern until it's confirmed and, if needed, seeded.
+  # TODO(Q2-rate-limit): SwiftChat's per-organization send-rate limit is
+  # still unpublished (the official Postman collection documents a 429
+  # response but no numeric limit — PRD-001-tasks Open Question Q2).
+  # `bsp_limit` is not yet seeded on the swiftchat Provider row's `keys`
+  # (unlike Gupshup's `keys["bsp_limit"]`), so this mirrors Maytapi's
+  # fallback-constant pattern until confirmed against a live account.
   @default_bsp_limit 30
 
   @doc """
@@ -67,7 +68,10 @@ defmodule Glific.Providers.Swiftchat.Worker do
            @default_bsp_limit
          ) do
       {:ok, _} ->
-        if Contacts.simulator_contact?(payload["destination"] || "") do
+        # SwiftChat's "to" is the recipient's real mobile number (confirmed
+        # via the Postman collection), so it doubles as the simulator check —
+        # same as Gupshup's payload["destination"].
+        if Contacts.simulator_contact?(payload["to"] || "") do
           Worker.process_simulator(message)
         else
           process_swiftchat(organization.id, payload, message)
@@ -81,11 +85,6 @@ defmodule Glific.Providers.Swiftchat.Worker do
   @spec process_swiftchat(non_neg_integer(), map(), map()) ::
           :ok | {:error, String.t()}
   defp process_swiftchat(org_id, payload, message) do
-    # "destination" is Glific-internal bookkeeping (used above for
-    # simulator detection since SwiftChat's "to" is a bot-scoped user id,
-    # not a phone) — strip it before it reaches the SwiftChat API body.
-    payload = Map.delete(payload, "destination")
-
     ApiClient.send_message(org_id, payload)
     |> ResponseHandler.handle_response(message)
   end

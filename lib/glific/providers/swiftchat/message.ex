@@ -29,21 +29,14 @@ defmodule Glific.Providers.Swiftchat.Message do
   @doc """
   Sends a plain-text message via SwiftChat.
 
-  # TODO(T-01): the exact JSON body shape (field names, whether `type` is
-  # required, whether there's a `msgid`/reference field like Gupshup's
-  # `msgid`) is unconfirmed — PRD-001 §2 could not extract the full
-  # message-send request body from the Postman collection. The shape below
-  # is a best guess mirroring SwiftChat's documented message-type palette
-  # (`type: "text"`, a `text` object with a `body` field, per common
-  # WhatsApp-Business-API-shaped conventions SwiftChat's docs reference).
-  # Confirm and adjust once the live spike lands.
+  Body shape confirmed from the official Postman collection
+  (`Message > Send-Text-Message`):
 
-  Per ADR-001 (primary branch): the SwiftChat user id is read from
-  `contact.fields["swiftchat_user_id"]`, written by the inbound normalizer
-  on every message (T-05, not yet implemented). A contact that has never
-  messaged in has no id yet and the send fails gracefully with a
-  user-visible, logged error instead of hitting SwiftChat with a bad
-  destination.
+      {"to": "+91XXXXXXXXXX", "type": "text", "text": {"body": "..."}}
+
+  `to` is the recipient's real mobile number — confirming ADR-001's
+  primary branch. Outbound needs no SwiftChat-side user id at all;
+  `contact.phone` is the destination, exactly like Gupshup.
   """
   @impl Glific.Providers.MessageBehaviour
   @spec send_text(Message.t(), map()) ::
@@ -126,51 +119,41 @@ defmodule Glific.Providers.Swiftchat.Message do
       else: %{error: "Message size greater than #{@max_size} characters"}
   end
 
-  # ADR-001 primary branch: SwiftChat user id lives in contact.fields,
-  # written on inbound (T-05). Contacts that never messaged in have none.
+  # SwiftChat's "to" is the recipient's real mobile number (confirmed via
+  # the Postman collection) — same as Gupshup's `:destination`. The worker
+  # also uses payload["to"] for simulator-contact detection.
   @spec put_destination(map(), Message.t()) :: map()
   defp put_destination(%{error: _} = payload, _message), do: payload
 
   defp put_destination(payload, message) do
-    case swiftchat_user_id(message.receiver) do
+    case receiver_phone(message.receiver) do
       nil ->
-        %{
-          error:
-            "Contact #{message.receiver_id} has no swiftchat_user_id yet (never messaged in) — cannot send"
-        }
+        %{error: "Contact #{message.receiver_id} has no phone — cannot send via SwiftChat"}
 
-      user_id ->
-        payload
-        |> Map.put("to", user_id)
-        # carried separately (never sent to SwiftChat) so the worker can
-        # detect simulator contacts by real phone, mirroring Gupshup's
-        # `payload["destination"]` check — the SwiftChat "to" field is the
-        # bot-scoped user id, not a phone, so it can't be used for that.
-        |> Map.put("destination", message.receiver.phone)
+      phone ->
+        Map.put(payload, "to", phone)
     end
   end
 
-  @spec swiftchat_user_id(Glific.Contacts.Contact.t() | Ecto.Association.NotLoaded.t() | nil) ::
+  @spec receiver_phone(Glific.Contacts.Contact.t() | Ecto.Association.NotLoaded.t() | nil) ::
           String.t() | nil
-  defp swiftchat_user_id(%Ecto.Association.NotLoaded{}), do: nil
-  defp swiftchat_user_id(nil), do: nil
-
-  defp swiftchat_user_id(contact),
-    do: get_in(contact.fields, ["swiftchat_user_id", "value"])
+  defp receiver_phone(%Ecto.Association.NotLoaded{}), do: nil
+  defp receiver_phone(nil), do: nil
+  defp receiver_phone(%{phone: phone}) when phone in [nil, ""], do: nil
+  defp receiver_phone(%{phone: phone}), do: phone
 
   @doc false
   @spec send_message(map(), Message.t(), map()) ::
           {:ok, Oban.Job.t()} | {:error, Ecto.Changeset.t()} | {:error, String.t()}
   defp send_message(%{error: error} = _payload, _message, _attrs), do: {:error, error}
 
-  defp send_message(payload, message, attrs) do
-    # carry the node reference along, so we can track this send when we
-    # receive the response for a particular message (mirrors Gupshup's
-    # "msgid" convention).
-    request_body = Map.put(payload, "msgid", message.uuid)
-
-    create_oban_job(message, request_body, attrs)
-  end
+  # Note: unlike Gupshup, the request body carries no extra `msgid` field —
+  # SwiftChat's documented send body has no reference-id passthrough, and
+  # unknown fields risk a 400 code-1 "Invalid request JSON". Tracking is by
+  # the Oban job's `message` args; the 201 response's `{"id": ...}` becomes
+  # the bsp_message_id in ResponseHandler.
+  defp send_message(payload, message, attrs),
+    do: create_oban_job(message, payload, attrs)
 
   @doc false
   @spec to_minimal_map(map()) :: map()

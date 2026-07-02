@@ -4,9 +4,8 @@ defmodule Glific.Providers.Swiftchat.ApiClientTest do
   request construction (T-04 acceptance criterion: "ExVCR test covers the
   send + error path").
 
-  # TODO(T-01): once the live send-endpoint path is confirmed, update the
-  # asserted URL below (currently the guessed
-  # "https://api.swiftchat.ai/bots/<bot_id>/messages" shape).
+  Endpoint confirmed from the official Postman collection:
+  `POST https://v1-api.swiftchat.ai/api/bots/{Bot-ID}/messages`.
   """
   use Glific.DataCase, async: false
 
@@ -60,20 +59,20 @@ defmodule Glific.Providers.Swiftchat.ApiClientTest do
 
       Tesla.Mock.mock(fn
         %{method: :post, url: url, headers: headers} ->
-          assert url == "https://api.swiftchat.ai/bots/test_bot_id/messages"
+          assert url == "https://v1-api.swiftchat.ai/api/bots/test_bot_id/messages"
           assert {"authorization", "Bearer test_swiftchat_api_key"} in headers
 
           %Tesla.Env{
-            status: 200,
-            body: Jason.encode!(%{"status" => "submitted", "messageId" => "swiftchat-msg-1"})
+            status: 201,
+            body: Jason.encode!(%{"id" => "swiftchat-msg-1"})
           }
       end)
 
-      assert {:ok, %Tesla.Env{status: 200}} =
+      assert {:ok, %Tesla.Env{status: 201}} =
                ApiClient.send_message(attrs.organization_id, %{
                  "type" => "text",
                  "text" => %{"body" => "hi"},
-                 "to" => "swiftchat-user-1"
+                 "to" => "+919876543210"
                })
     end
 

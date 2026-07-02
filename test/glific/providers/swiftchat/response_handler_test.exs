@@ -14,18 +14,39 @@ defmodule Glific.Providers.Swiftchat.ResponseHandlerTest do
   }
 
   describe "handle_response/2" do
-    test "success (2xx) updates the message with the bsp_message_id", attrs do
+    test "success (201, JSON-string body) updates the message with the bsp_message_id",
+         attrs do
       message = Fixtures.message_fixture(attrs)
 
+      # confirmed SwiftChat success shape: 201 {"id": "<uuid>"} — body as a
+      # raw JSON string, the shape Tesla hands over when no content-type
+      # header triggers the JSON middleware's decode.
       response = %Tesla.Env{
-        status: 200,
-        body: Jason.encode!(%{"status" => "submitted", "messageId" => "swiftchat-msg-1"})
+        status: 201,
+        body: Jason.encode!(%{"id" => "swiftchat-msg-1"})
       }
 
       assert :ok = ResponseHandler.handle_response({:ok, response}, message)
 
       updated_message = Messages.get_message!(message.id)
       assert updated_message.bsp_message_id == "swiftchat-msg-1"
+      assert updated_message.bsp_status == :enqueued
+    end
+
+    test "success (201, already-decoded map body) also lands the bsp_message_id", attrs do
+      message = Fixtures.message_fixture(attrs)
+
+      # on a real response, Tesla.Middleware.JSON decodes application/json
+      # bodies to a map before the handler sees them — both shapes must work.
+      response = %Tesla.Env{
+        status: 201,
+        body: %{"id" => "swiftchat-msg-2"}
+      }
+
+      assert :ok = ResponseHandler.handle_response({:ok, response}, message)
+
+      updated_message = Messages.get_message!(message.id)
+      assert updated_message.bsp_message_id == "swiftchat-msg-2"
       assert updated_message.bsp_status == :enqueued
     end
 

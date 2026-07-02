@@ -5,10 +5,10 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
   `gupshup_messages` describe block, swapped to SwiftChat as org 1's
   active BSP.
 
-  # TODO(T-01): once the live send-endpoint path/JSON body are confirmed,
-  # update the `Tesla.Mock` URL match below (currently
-  # "https://api.swiftchat.ai/bots/*/messages", the guessed shape from
-  # `Glific.Providers.Swiftchat.ApiClient`) and any body assertions.
+  Endpoint, body, and response shapes confirmed from the official
+  "SwiftChat Platform" Postman collection — see
+  docs/prds/PRD-001-spike-notes.md in the planning repo: success is `201`
+  with `{"id": "<uuid>"}`, and `to` is the recipient's real mobile number.
   """
   use Glific.DataCase, async: false
   use Oban.Pro.Testing, repo: Glific.Repo
@@ -29,9 +29,10 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
 
     Tesla.Mock.mock(fn
       %{method: :post} ->
+        # confirmed SwiftChat success shape: 201 {"id": "<uuid>"}
         %Tesla.Env{
-          status: 200,
-          body: Jason.encode!(%{"status" => "submitted", "messageId" => Faker.String.base64(36)})
+          status: 201,
+          body: Jason.encode!(%{"id" => Ecto.UUID.generate()})
         }
     end)
 
@@ -76,17 +77,9 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
   end
 
   describe "send_text/2" do
-    defp contact_with_swiftchat_id(attrs, swiftchat_user_id) do
-      Fixtures.contact_fixture(
-        Map.merge(attrs, %{
-          fields: %{"swiftchat_user_id" => %{"value" => swiftchat_user_id, "type" => "string"}}
-        })
-      )
-    end
-
     test "send message should update the provider message id", attrs do
       sender = Fixtures.contact_fixture(attrs)
-      receiver = contact_with_swiftchat_id(attrs, "swiftchat-user-123")
+      receiver = Fixtures.contact_fixture(attrs)
 
       message =
         Fixtures.message_fixture(%{
@@ -111,7 +104,7 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
 
     test "send message should return error when characters limit is reached", attrs do
       sender = Fixtures.contact_fixture(attrs)
-      receiver = contact_with_swiftchat_id(attrs, "swiftchat-user-123")
+      receiver = Fixtures.contact_fixture(attrs)
 
       message =
         Fixtures.message_fixture(%{
@@ -127,34 +120,27 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
       assert error_msg == "Message size greater than 4096 characters"
     end
 
-    test "send message should error gracefully when contact has no swiftchat_user_id yet",
-         attrs do
-      sender = Fixtures.contact_fixture(attrs)
-      # receiver never messaged in -> no fields["swiftchat_user_id"] (ADR-001 primary branch)
-      receiver = Fixtures.contact_fixture(attrs)
+    test "send message should error gracefully when the receiver has no phone" do
+      # A hand-built message whose receiver carries no phone — the guard in
+      # put_destination/2 must fail the send before any Oban job is created.
+      # (A persisted contact always has a phone, so this protects against
+      # unloaded/nil receivers, not a realistic DB state.)
+      message = %Glific.Messages.Message{
+        body: "hello",
+        uuid: Ecto.UUID.generate(),
+        receiver_id: 0,
+        receiver: %Glific.Contacts.Contact{phone: nil}
+      }
 
-      message =
-        Fixtures.message_fixture(%{
-          organization_id: attrs.organization_id,
-          sender_id: sender.id,
-          receiver_id: receiver.id,
-          body: "hello",
-          type: :text,
-          flow: :outbound
-        })
-
-      assert {:error, error_msg} = Communications.Message.send_message(message)
-      assert error_msg =~ "no swiftchat_user_id"
+      assert {:error, error_msg} = Glific.Providers.Swiftchat.Message.send_text(message)
+      assert error_msg =~ "no phone"
     end
 
     test "send message to a simulator contact is faked, not sent over the wire", attrs do
       sender = Fixtures.contact_fixture(attrs)
 
       receiver =
-        contact_with_swiftchat_id(
-          Map.put(attrs, :phone, Contacts.simulator_phone_prefix() <> "1"),
-          "swiftchat-user-simulator"
-        )
+        Fixtures.contact_fixture(Map.put(attrs, :phone, Contacts.simulator_phone_prefix() <> "1"))
 
       message =
         Fixtures.message_fixture(%{

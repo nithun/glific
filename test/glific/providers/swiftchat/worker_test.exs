@@ -47,9 +47,10 @@ defmodule Glific.Providers.Swiftchat.WorkerTest do
 
     Tesla.Mock.mock(fn
       %{method: :post} ->
+        # confirmed SwiftChat success shape: 201 {"id": "<uuid>"}
         %Tesla.Env{
-          status: 200,
-          body: Jason.encode!(%{"status" => "submitted", "messageId" => Faker.String.base64(36)})
+          status: 201,
+          body: Jason.encode!(%{"id" => Ecto.UUID.generate()})
         }
     end)
 
@@ -60,12 +61,7 @@ defmodule Glific.Providers.Swiftchat.WorkerTest do
     test "seeds organization context in a fresh process with none set", attrs do
       sender = Fixtures.contact_fixture(attrs)
 
-      receiver =
-        Fixtures.contact_fixture(
-          Map.merge(attrs, %{
-            fields: %{"swiftchat_user_id" => %{"value" => "swiftchat-user-1", "type" => "string"}}
-          })
-        )
+      receiver = Fixtures.contact_fixture(attrs)
 
       message =
         Fixtures.message_fixture(%{
@@ -85,7 +81,7 @@ defmodule Glific.Providers.Swiftchat.WorkerTest do
           "payload" => %{
             "type" => "text",
             "text" => %{"body" => "hello"},
-            "to" => "swiftchat-user-1"
+            "to" => receiver.phone
           },
           "attrs" => %{}
         }

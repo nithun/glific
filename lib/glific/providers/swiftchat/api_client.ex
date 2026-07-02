@@ -10,13 +10,10 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
   alias Glific.Partners
   use Gettext, backend: GlificWeb.Gettext
 
-  # TODO(T-01): confirm the real SwiftChat base URL from the merchant
-  # dashboard (dashboard.swiftchat.ai) — this placeholder is a guess from
-  # PRD-001 §2 ("Base + auth"). Once confirmed, either hardcode it here (if
-  # SwiftChat uses a single global base URL for all merchants, like Gupshup)
-  # or read it from the seeded Provider row's `keys["api_end_point"]`
-  # (if it's merchant/region specific).
-  @swiftchat_url "https://api.swiftchat.ai"
+  # Confirmed from the official "SwiftChat Platform" Postman collection
+  # (collection variable `URL`; see docs/prds/PRD-001-spike-notes.md in the
+  # planning repo). Single global base URL for all merchants.
+  @swiftchat_url "https://v1-api.swiftchat.ai/api"
 
   use Tesla
   # you can add , log_level: :debug to the below if you want debugging info
@@ -73,11 +70,9 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
   @doc """
   Sending a message to a SwiftChat bot user.
 
-  # TODO(T-01): confirm the exact send-message path. PRD-001 §2 records the
-  # path pattern as `…/bots/{Bot-ID}/messages` but the exact prefix/casing
-  # was not confirmed against a live account or the full Postman
-  # collection. This is the ONE place that builds the send URL, so once
-  # T-01 lands, only this function needs to change.
+  Path confirmed from the official Postman collection:
+  `POST {URL}/bots/{Bot-ID}/messages` with Bearer `{API-Key}` auth.
+  Success response is `201` with `{"id": "<uuid>"}` — the BSP message id.
   """
   @spec send_message(non_neg_integer(), map()) :: Tesla.Env.result() | {:error, String.t()}
   def send_message(org_id, payload) do

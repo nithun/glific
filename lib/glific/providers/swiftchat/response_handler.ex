@@ -16,7 +16,10 @@ defmodule Glific.Providers.Swiftchat.ResponseHandler do
   def handle_response({:ok, response}, message) do
     case response do
       %Tesla.Env{status: status} when status in 200..299 ->
-        Communications.Message.handle_success_response(response, message)
+        response
+        |> normalize_success_body()
+        |> Communications.Message.handle_success_response(message)
+
         :ok
 
       # Not authorized, job succeeded, we should return an ok, so we don't retry
@@ -65,6 +68,20 @@ defmodule Glific.Providers.Swiftchat.ResponseHandler do
       _ ->
         :ok
     end
+  end
+
+  # SwiftChat's success response is `201` with `{"id": "<uuid>"}` (Postman:
+  # `Message > Send-Text-Message`), while the shared
+  # `Communications.Message.handle_success_response/2` expects a JSON-string
+  # body carrying Gupshup's `"messageId"` key — normalize both differences
+  # here rather than forking the shared success path. Handles the body
+  # arriving either as a raw JSON string (no content-type header, e.g.
+  # Tesla.Mock) or already decoded to a map (Tesla.Middleware.JSON on a
+  # real application/json response).
+  @spec normalize_success_body(Tesla.Env.t()) :: Tesla.Env.t()
+  defp normalize_success_body(%Tesla.Env{body: body} = env) do
+    decoded = if is_binary(body), do: Jason.decode!(body), else: body
+    %{env | body: Jason.encode!(%{"messageId" => decoded["id"]})}
   end
 
   # `Glific.SafeLog.safe_inspect/1` only strips `__client__` off a bare

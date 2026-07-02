@@ -55,11 +55,10 @@ defmodule Glific.Seeds.Seeds20260702000001AddSwiftchatProvider do
             api_end_point: %{
               type: :string,
               label: "API End Point",
-              # TODO(T-01): confirm the real SwiftChat base URL from a live
-              # merchant dashboard — this is the same guessed placeholder as
-              # `Glific.Providers.Swiftchat.ApiClient`'s @swiftchat_url and
-              # must be kept in sync with it once confirmed.
-              default: "https://api.swiftchat.ai",
+              # Confirmed from the official Postman collection (variable
+              # `URL`); keep in sync with
+              # `Glific.Providers.Swiftchat.ApiClient`'s @swiftchat_url.
+              default: "https://v1-api.swiftchat.ai/api",
               view_only: false
             },
             handler: %{
