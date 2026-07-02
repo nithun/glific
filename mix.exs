@@ -4,11 +4,9 @@ defmodule Glific.MixProject do
   @github_url "https://github.com/glific/glific/"
   @home_url "https://glific.io"
   @test_envs [:test, :test_full]
-  @oban_envs [:prod, :dev] ++ @test_envs
-  # comment above line
   # if you don't have Oban pro license, this is your best hack
-  # uncomment below line
-  # @oban_envs [:prod]
+  # @oban_envs [:prod, :dev] ++ @test_envs
+  @oban_envs [:prod]
 
   def project do
     [
@@ -117,9 +115,22 @@ defmodule Glific.MixProject do
       {:dataloader, "~> 2.0"},
       {:hackney, "~> 1.17"},
       {:tesla, "~> 1.5"},
-      {:oban, "~> 2.19"},
-      {:oban_web, "~> 2.11", only: @oban_envs},
-      {:oban_pro, "~> 1.5", repo: "oban", only: @oban_envs},
+      {:oban, "~> 2.19"}
+    ] ++
+      # free-Oban path (no Oban Pro license): the oban_pro/oban_web deps declare a
+      # private Hex repo ("oban") that `mix deps.get` validates unconditionally,
+      # regardless of `only:` env scoping — so they must be excluded from the deps
+      # list entirely outside :prod, not just marked only: @oban_envs.
+      # See docs/architecture.md and the "if you don't have Oban pro license" note above.
+      if Mix.env() in @oban_envs do
+        [
+          {:oban_web, "~> 2.11"},
+          {:oban_pro, "~> 1.5", repo: "oban"}
+        ]
+      else
+        []
+      end ++
+      [
       {:faker, "~> 0.13"},
       {:mock, "~> 0.3", only: [:dev | @test_envs]},
       {:excoveralls, "~> 0.15", only: @test_envs},
