@@ -47,8 +47,15 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
   def swiftchat_post(url, payload, api_key),
     do: post(url, payload, headers: [{"authorization", "Bearer " <> api_key}])
 
+  @doc """
+  Resolves the org's SwiftChat credentials for callers outside this module
+  (`Swiftchat.Template`'s submit/sync/delete flows all need `merchant_id` +
+  `api_key`, neither of which `send_message/2`/`get_media_url/2` expose).
+  Kept as a thin public wrapper around the existing private lookup rather
+  than duplicating the credential-fetch logic (PRD-002 T-02).
+  """
   @spec get_credentials(non_neg_integer()) :: {:error, String.t()} | {:ok, map()}
-  defp get_credentials(org_id) do
+  def get_credentials(org_id) do
     organization = Partners.organization(org_id)
 
     if is_nil(organization.services["bsp"]) do
@@ -103,6 +110,63 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
     with {:ok, credentials} <- get_credentials(org_id) do
       url = @swiftchat_url <> "/bots/" <> credentials.bot_id <> "/media/" <> media_id
       swiftchat_get(url, credentials.api_key)
+    end
+  end
+
+  @doc """
+  Creates (submits for approval) a SwiftChat template.
+
+  Path confirmed from the official Postman collection / PRD-001 spike notes
+  ("Bonus findings" -> Templates):
+  `POST {URL}/merchants/{Merchant-ID}/templates` with Bearer `{API-Key}`
+  auth. Success is `201 Created`; the response body is not confirmed to be
+  JSON on a live call (may be the literal non-JSON string `"Created"`) — see
+  `Swiftchat.Template.submit_for_approval/1`, which handles both shapes.
+  """
+  @spec create_template(non_neg_integer(), map()) :: Tesla.Env.result() | {:error, String.t()}
+  def create_template(org_id, payload) do
+    with {:ok, credentials} <- get_credentials(org_id) do
+      url = @swiftchat_url <> "/merchants/" <> credentials.merchant_id <> "/templates"
+      swiftchat_post(url, payload, credentials.api_key)
+    end
+  end
+
+  @doc """
+  Lists all templates for the org's SwiftChat merchant.
+
+  Path confirmed: `GET {URL}/merchants/{Merchant-ID}/templates` with Bearer
+  `{API-Key}` auth. See `Swiftchat.Template`'s poll-sync
+  (`update_hsm_templates/1`, PRD-002 T-03/T-04) for response-shape handling
+  (the confirmed sample nests `data` one level deeper than expected).
+  """
+  @spec list_templates(non_neg_integer()) :: Tesla.Env.result() | {:error, String.t()}
+  def list_templates(org_id) do
+    with {:ok, credentials} <- get_credentials(org_id) do
+      url = @swiftchat_url <> "/merchants/" <> credentials.merchant_id <> "/templates"
+      swiftchat_get(url, credentials.api_key)
+    end
+  end
+
+  @doc """
+  Deletes a SwiftChat template by name.
+
+  Path confirmed: `DELETE {URL}/merchants/{Merchant-ID}/templates/{Template-Name}`
+  with Bearer `{API-Key}` auth. `template_name` is the value stored in
+  `SessionTemplate.bsp_id` (SwiftChat templates are keyed by name, not a
+  numeric id).
+  """
+  @spec delete_template(non_neg_integer(), String.t()) ::
+          Tesla.Env.result() | {:error, String.t()}
+  def delete_template(org_id, template_name) do
+    with {:ok, credentials} <- get_credentials(org_id) do
+      url =
+        @swiftchat_url <>
+          "/merchants/" <>
+          credentials.merchant_id <>
+          "/templates/" <>
+          template_name
+
+      delete(url, headers: [{"authorization", "Bearer " <> credentials.api_key}])
     end
   end
 end

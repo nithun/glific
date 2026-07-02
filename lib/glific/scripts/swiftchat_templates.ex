@@ -1,13 +1,25 @@
 defmodule Glific.Scripts.SwiftchatTemplates do
   @moduledoc """
-  Admin helper script for SwiftChat template phase 1 (PRD-001-tasks T-10,
-  ADR-005 "manual bsp_id mapping").
+  Admin helper script for SwiftChat templates, originally written for phase
+  1 (PRD-001-tasks T-10, ADR-005 "manual bsp_id mapping").
 
-  SwiftChat templates are authored and approved in the SwiftChat merchant
-  dashboard (`POST /merchants/{Merchant-ID}/templates`, out of Glific's
-  control in phase 1). Once a template shows `ACTIVE` there, run this
-  helper from the IEx console to insert (or update) the matching
-  `session_templates` row so Glific's existing HSM send path
+  **Phase 2 update (`docs/prds/PRD-002-swiftchat-template-sync.md`):**
+  `Glific.Providers.Swiftchat.Template.submit_for_approval/1` now
+  supersedes this script as the *primary* path for creating SwiftChat
+  templates from Glific (real API submission via
+  `createSessionTemplate(is_hsm: true)`), and `update_hsm_templates/1` now
+  pulls in dashboard-created templates automatically on every hourly poll.
+  This script is **not deleted** — it remains a documented manual fallback
+  for cases phase 2 doesn't cover (e.g. template types this phase's
+  text-only scope excludes, or emergency `bsp_id` correction for a row
+  that's drifted out of sync).
+
+  SwiftChat templates are authored and approved either directly in the
+  SwiftChat merchant dashboard, or (as of phase 2) submitted from Glific via
+  `POST /merchants/{Merchant-ID}/templates`. Once a template shows `ACTIVE`,
+  either the hourly poll sync (phase 2, preferred) or this helper (manual
+  fallback) inserts/updates the matching `session_templates` row so
+  Glific's existing HSM send path
   (`Glific.Messages.create_and_send_hsm_message/1` ->
   `Glific.Providers.Swiftchat.Message.send_text/2`) can use it —
   see `docs/adrs/ADR-005-swiftchat-template-strategy.md`.
