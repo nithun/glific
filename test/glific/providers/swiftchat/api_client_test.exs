@@ -167,4 +167,28 @@ defmodule Glific.Providers.Swiftchat.ApiClientTest do
       assert error_msg =~ "API Key and Bot ID"
     end
   end
+
+  describe "get_bot_configuration/2 (PRD-003 F-2: live credential-verification ping)" do
+    test "GETs the bot-scoped configuration endpoint with a Bearer token header" do
+      Tesla.Mock.mock(fn
+        %{method: :get, url: url, headers: headers} ->
+          assert url == "https://v1-api.swiftchat.ai/api/bots/test_bot_id/configuration"
+          assert {"authorization", "Bearer test_swiftchat_api_key"} in headers
+
+          %Tesla.Env{status: 200, body: Jason.encode!(%{"bot_id" => "test_bot_id"})}
+      end)
+
+      assert {:ok, %Tesla.Env{status: 200}} =
+               ApiClient.get_bot_configuration("test_bot_id", "test_swiftchat_api_key")
+    end
+
+    test "propagates a non-2xx response for the caller to map" do
+      Tesla.Mock.mock(fn %{method: :get} ->
+        %Tesla.Env{status: 401, body: Jason.encode!(%{"code" => 110})}
+      end)
+
+      assert {:ok, %Tesla.Env{status: 401}} =
+               ApiClient.get_bot_configuration("test_bot_id", "bad_api_key")
+    end
+  end
 end

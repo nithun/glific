@@ -39,8 +39,10 @@ defmodule Glific.Partners do
     Providers.Gupshup.GupshupWallet,
     Providers.Gupshup.PartnerAPI,
     Providers.Maytapi.WAWorker,
+    Providers.Swiftchat.ApiClient,
     Repo,
     RepoReplica,
+    SafeLog,
     Settings.Language,
     Stats,
     Users.User
@@ -1141,19 +1143,29 @@ defmodule Glific.Partners do
   end
 
   # SwiftChat is a keys-driven BSP (handler/worker resolved from the
-  # Provider row's `keys`, lesson L-005) with no partner-verification API
-  # of its own in phase 1 (ADR-005) — mirrors the minimal
-  # "gupshup_enterprise" shape: validate the required secrets are present
-  # (`validate_secrets?/2` "swiftchat" clause above) and set
-  # `organization.bsp_id` so the org becomes selectable end-to-end through
-  # Settings -> Integrations. No remote credential-verification call
-  # exists to make (unlike Gupshup's `verify_gupshup_credentials/2`).
+  # Provider row's `keys`, lesson L-005). PRD-003 F-2 (2026-07-02) added a
+  # live credential-verification ping — `GET /bots/{id}/configuration` —
+  # mirroring Gupshup's `verify_gupshup_credentials/2` precedent: only set
+  # `organization.bsp_id` (making the org selectable end-to-end through
+  # Settings -> Integrations) AFTER the ping confirms the api_key/bot_id
+  # actually work against the live SwiftChat API, and propagate a mapped
+  # `{:error, message}` up through `update_credential/2` otherwise so the
+  # GraphQL mutation fails with a reason instead of silently succeeding
+  # with dead credentials.
   defp credential_update_callback(organization, credential, "swiftchat") do
     if valid_bsp?(credential) do
-      update_organization(organization, %{bsp_id: credential.provider.id})
-    end
+      case verify_swiftchat_credentials(credential) do
+        {:ok, _} ->
+          update_organization(organization, %{bsp_id: credential.provider.id})
+          {:ok, credential}
 
-    {:ok, credential}
+        {:error, message} ->
+          Glific.Metrics.increment("Swiftchat Credential Update Failed")
+          {:error, message}
+      end
+    else
+      {:error, "API Key, Bot ID and Merchant ID can't be empty"}
+    end
   end
 
   defp credential_update_callback(organization, credential, "maytapi") do
@@ -1223,6 +1235,53 @@ defmodule Glific.Partners do
     bsp_cred
     |> Credential.changeset(attrs)
     |> Repo.update()
+  end
+
+  @doc """
+  Verify SwiftChat credentials with a live `GET /bots/{id}/configuration`
+  ping (PRD-003 F-2). Reads straight off `credential.secrets` (not the org
+  cache) since this runs before `organization.bsp_id` is set — same
+  precedent as `verify_gupshup_credentials/2`.
+
+  Error mapping confirmed live 2026-07-02 (PRD-003 audit row):
+  - `401` / code `110`  -> invalid API key
+  - `400` / code `2`    -> invalid Bot ID
+  - `403` / code `108`  -> SwiftChat account inactive
+  - network/transport failure -> can't-reach message
+  - any other non-2xx   -> generic verification-failed message
+
+  Never includes the api_key in the returned message (L-003/L-011).
+  """
+  @spec verify_swiftchat_credentials(Credential.t()) :: {:ok, map()} | {:error, String.t()}
+  def verify_swiftchat_credentials(credential) do
+    %{secrets: %{"api_key" => api_key, "bot_id" => bot_id}} = credential
+
+    bot_id
+    |> ApiClient.get_bot_configuration(api_key)
+    |> case do
+      {:ok, %Tesla.Env{status: status, body: body}} when status in 200..299 ->
+        {:ok, body}
+
+      {:ok, %Tesla.Env{status: 401, body: %{"code" => 110}}} ->
+        {:error, "Invalid API key"}
+
+      {:ok, %Tesla.Env{status: 400, body: %{"code" => 2}}} ->
+        {:error, "Invalid Bot ID"}
+
+      {:ok, %Tesla.Env{status: 403, body: %{"code" => 108}}} ->
+        {:error, "SwiftChat account inactive — contact your relationship manager"}
+
+      {:ok, %Tesla.Env{} = env} ->
+        Glific.log_error("SwiftChat credential verification failed: #{SafeLog.safe_inspect(env)}")
+        {:error, "Unable to verify SwiftChat credentials, please check your settings"}
+
+      {:error, reason} ->
+        Glific.log_error(
+          "SwiftChat credential verification network failure: #{SafeLog.safe_inspect(reason)}"
+        )
+
+        {:error, "Could not reach SwiftChat, please check your network and try again"}
+    end
   end
 
   @doc """

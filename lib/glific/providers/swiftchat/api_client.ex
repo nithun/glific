@@ -114,6 +114,28 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
   end
 
   @doc """
+  Fetches a SwiftChat bot's configuration — the cheapest authenticated
+  endpoint that validates both `api_key` and `bot_id` in a single call.
+
+  Path confirmed live 2026-07-02 (PRD-003 F-2 / Q1):
+  `GET {URL}/bots/{Bot-ID}/configuration` with Bearer `{API-Key}` auth,
+  returning `200` with the bot's configuration JSON on success.
+
+  Takes `bot_id`/`api_key` directly (not an `org_id`) because
+  `Partners.credential_update_callback/3`'s `"swiftchat"` clause must
+  verify the credential being saved *before* it is committed as the
+  org's active BSP — `get_credentials/1` reads from the already-cached
+  `organization.services["bsp"]`, which is the wrong (stale/not-yet-set)
+  source at that point in the save flow. Mirrors `verify_gupshup_credentials/2`
+  reading straight off `credential.secrets` rather than the org cache.
+  """
+  @spec get_bot_configuration(String.t(), String.t()) :: Tesla.Env.result()
+  def get_bot_configuration(bot_id, api_key) do
+    url = @swiftchat_url <> "/bots/" <> bot_id <> "/configuration"
+    swiftchat_get(url, api_key)
+  end
+
+  @doc """
   Creates (submits for approval) a SwiftChat template.
 
   Path confirmed from the official Postman collection / PRD-001 spike notes
