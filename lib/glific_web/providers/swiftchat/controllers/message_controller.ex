@@ -61,12 +61,29 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageController do
   end
 
   @doc """
-  Parse an inbound SwiftChat `button_response` payload (the only
-  interactive-reply shape implemented in T-05 — `multi_select_button_response`
-  and `persistent_menu_response` are scoped to T-09).
+  Parse an inbound SwiftChat interactive-reply payload — `button_response`
+  (T-05), or `multi_select_button_response` / `persistent_menu_response`
+  (T-09) — and convert it into a Glific message via the shared
+  `Swiftchat.Message.receive_interactive/1` normalizer.
+
+  Message type passed to `Communications.Message.receive_message/2`:
+  `:quick_reply` for all three subtypes. `button_response` and
+  `persistent_menu_response` are both single-selection button-style
+  replies (just from different SwiftChat UI surfaces), and
+  `multi_select_button_response` is Glific's closest existing type to a
+  multi-select answer even though SwiftChat's `list`-shaped outbound
+  content maps to a *different* SwiftChat payload (`multi_select_button`,
+  see `Swiftchat.Message.send_interactive/2`) — there being no separate
+  Glific message-type concept for "multi-select reply" beyond
+  `:quick_reply`/`:list`, and `:list` outbound already means something
+  else in Glific's own vocabulary (a WhatsApp list message), using
+  `:quick_reply` here avoids conflating the two. `Flows.Router` treats
+  `:quick_reply` and `:list` identically for merging
+  `msg.interactive_content` into flow results either way.
   """
   @spec interactive(Plug.Conn.t(), map()) :: Plug.Conn.t()
-  def interactive(conn, %{"type" => "button_response"} = params) do
+  def interactive(conn, %{"type" => type} = params)
+      when type in ~w(button_response multi_select_button_response persistent_menu_response) do
     organization_id = conn.assigns[:organization_id]
 
     params
@@ -78,10 +95,10 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageController do
     handler(conn, params, "interactive handler")
   end
 
-  # multi_select_button_response / persistent_menu_response: T-09 scope,
-  # not implemented here. Ack with 200 rather than drop/crash — SwiftChat's
-  # retry behavior on non-200s is undocumented.
-  def interactive(conn, params), do: handler(conn, params, "interactive handler (T-09 scope)")
+  # Any other/unrecognized interactive subtype: ack with 200 rather than
+  # drop/crash — SwiftChat's retry behavior on non-200s is undocumented.
+  def interactive(conn, params),
+    do: handler(conn, params, "interactive handler (unrecognized subtype)")
 
   @doc """
   Parse an inbound SwiftChat media message payload (`image`, `document`,

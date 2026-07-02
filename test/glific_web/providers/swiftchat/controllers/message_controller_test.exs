@@ -37,6 +37,29 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
     "button_response" => %{"button_index" => 1, "body" => "Class 1"}
   }
 
+  @multi_select_response_webhook %{
+    "from" => "+919917443994",
+    "type" => "multi_select_button_response",
+    "timestamp" => 1_707_216_634,
+    "message_id" => "swiftchat-msg-multi-1",
+    "conversation_id" => "conv-1",
+    "conversation_initiated_by" => "user",
+    "multi_select_button_response" => [
+      %{"button_index" => 1, "body" => "Class 1"},
+      %{"button_index" => 2, "body" => "Class 2"}
+    ]
+  }
+
+  @persistent_menu_response_webhook %{
+    "from" => "+919917443994",
+    "type" => "persistent_menu_response",
+    "timestamp" => 1_707_216_634,
+    "message_id" => "swiftchat-msg-menu-1",
+    "conversation_id" => "conv-1",
+    "conversation_initiated_by" => "user",
+    "persistent_menu_response" => %{"id" => "menu-item-1", "body" => "Talk to a human"}
+  }
+
   describe "text" do
     test "inbound text creates a contact with the real phone in the right org",
          %{conn: conn, organization_id: organization_id} do
@@ -151,6 +174,92 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
     end
   end
 
+  describe "interactive (multi_select_button_response, T-09)" do
+    test "inbound multi_select_button_response creates a message with the joined reply body",
+         %{conn: conn, organization_id: organization_id} do
+      conn = post(conn, "/swiftchat", @multi_select_response_webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-multi-1",
+          organization_id: organization_id
+        })
+
+      message = Repo.preload(message, [:sender])
+
+      assert message.flow == :inbound
+      assert message.body == "Class 1, Class 2"
+      assert message.sender.phone == "+919917443994"
+
+      assert message.interactive_content == %{
+               "selections" => [
+                 %{"button_index" => 1, "body" => "Class 1"},
+                 %{"button_index" => 2, "body" => "Class 2"}
+               ]
+             }
+    end
+
+    test "unknown extra keys in the multi_select_button_response envelope do not crash the normalizer",
+         %{conn: conn, organization_id: organization_id} do
+      webhook =
+        @multi_select_response_webhook
+        |> Map.put("message_id", "swiftchat-msg-multi-unknown-keys")
+        |> Map.put("a_future_field_swiftchat_might_add", %{"nested" => "value"})
+
+      conn = post(conn, "/swiftchat", webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-multi-unknown-keys",
+          organization_id: organization_id
+        })
+
+      assert message.body == "Class 1, Class 2"
+    end
+  end
+
+  describe "interactive (persistent_menu_response, T-09)" do
+    test "inbound persistent_menu_response creates a message with the reply body",
+         %{conn: conn, organization_id: organization_id} do
+      conn = post(conn, "/swiftchat", @persistent_menu_response_webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-menu-1",
+          organization_id: organization_id
+        })
+
+      message = Repo.preload(message, [:sender])
+
+      assert message.flow == :inbound
+      assert message.body == "Talk to a human"
+      assert message.sender.phone == "+919917443994"
+      assert message.interactive_content["id"] == "menu-item-1"
+    end
+
+    test "unknown extra keys in the persistent_menu_response envelope do not crash the normalizer",
+         %{conn: conn, organization_id: organization_id} do
+      webhook =
+        @persistent_menu_response_webhook
+        |> Map.put("message_id", "swiftchat-msg-menu-unknown-keys")
+        |> Map.put("a_future_field_swiftchat_might_add", %{"nested" => "value"})
+
+      conn = post(conn, "/swiftchat", webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-menu-unknown-keys",
+          organization_id: organization_id
+        })
+
+      assert message.body == "Talk to a human"
+    end
+  end
+
   describe "unknown/unhandled payload types" do
     test "message_rated events get 200, not dropped", %{conn: conn} do
       rated_webhook = %{
@@ -164,21 +273,6 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
       }
 
       conn = post(conn, "/swiftchat", rated_webhook)
-      assert response(conn, 200) == ""
-    end
-
-    test "multi_select_button_response (T-09 scope) gets 200, not dropped", %{conn: conn} do
-      multi_select_webhook = %{
-        "from" => "+919917443994",
-        "type" => "multi_select_button_response",
-        "timestamp" => 1_707_216_634,
-        "message_id" => "swiftchat-msg-multi",
-        "conversation_id" => "conv-1",
-        "conversation_initiated_by" => "user",
-        "multi_select_button_response" => [%{"button_index" => 1, "body" => "Option A"}]
-      }
-
-      conn = post(conn, "/swiftchat", multi_select_webhook)
       assert response(conn, 200) == ""
     end
 

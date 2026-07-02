@@ -2,13 +2,15 @@ defmodule Glific.Providers.Swiftchat.Message do
   @moduledoc """
   Message API layer between application and SwiftChat.
 
-  Implemented so far: `send_text/2` (T-04), `receive_text/1` and
-  `receive_interactive/1` for button replies (T-05), media send/receive
-  (T-08: `send_image/2`, `send_video/2`, `send_document/2`, `send_audio/2`,
-  `receive_media/1`). Remaining interactive subtypes and template sends
-  are later tasks (T-09/T-10) — each unimplemented callback fails loudly
-  (logged error or raise) rather than silently building a wrong payload
-  against an unconfirmed endpoint shape.
+  Implemented so far: `send_text/2` (T-04), `receive_text/1` (T-05),
+  media send/receive (T-08: `send_image/2`, `send_video/2`,
+  `send_document/2`, `send_audio/2`, `receive_media/1`), interactive
+  send/receive (T-09: `send_interactive/2` for `quick_reply`/`list`,
+  `receive_interactive/1` for `button_response` /
+  `multi_select_button_response` / `persistent_menu_response`). Template
+  sends are the remaining later task (T-10) — each unimplemented callback
+  fails loudly (logged error or raise) rather than silently building a
+  wrong payload against an unconfirmed endpoint shape.
   """
 
   @behaviour Glific.Providers.MessageBehaviour
@@ -21,7 +23,7 @@ defmodule Glific.Providers.Swiftchat.Message do
   import Ecto.Query, warn: false
   require Logger
 
-  @not_implemented "Glific.Providers.Swiftchat.Message: not implemented (see PRD-001-tasks T-04/T-05/T-08/T-09/T-10)"
+  @not_implemented "Glific.Providers.Swiftchat.Message: not implemented (see PRD-001-tasks T-04/T-05/T-08/T-10)"
 
   @doc """
   Sends a plain-text message via SwiftChat.
@@ -194,10 +196,80 @@ defmodule Glific.Providers.Swiftchat.Message do
     send_image(message, attrs)
   end
 
-  @doc false
+  @doc """
+  Sends an interactive message via SwiftChat, mapping Glific's
+  interactive-content shape (`message.interactive_content`, produced by
+  `InteractiveTemplate`/`Flows.ContactAction`) onto the closest SwiftChat
+  outbound shape.
+
+  **Mapping decision (T-09, PRD-001 §3.2), documented here since it's not
+  a 1:1 name match:**
+
+  - Glific `quick_reply` (`interactive_content` has `"content"` +
+    `"options"`, a flat list of up to a few reply buttons — see
+    `lib/glific/seeds/seeds_flows.ex`) -> SwiftChat `type: "button"`
+    (`Message > Send-Button-Message` in the Postman collection). This is
+    the closest shape: both are a body + a flat list of tappable reply
+    buttons.
+
+  - Glific `list` (`interactive_content` has `"title"`, `"body"`,
+    `"globalButtons"`, and `"items"` — each item a section with its own
+    `"options"`, WhatsApp's *list message* concept, see
+    `test/glific/templates/interactive_template_test.exs`) -> SwiftChat
+    **`multi_select_button`** (`Message > Send-Multi-Select-Button-Message`),
+    NOT `card`. Reasoning: `card` requires a mandatory `header.image` with
+    a SwiftChat media id per card (`Message > Send-Card-Message`) — Glific's
+    `list` content carries no image at all, so a card mapping would need to
+    fabricate a required field. `multi_select_button` needs no image and
+    accepts a flat list of `{icon, type, body, reply}` buttons, which is
+    what a flattened `items[].options[]` list already is (WhatsApp's
+    section grouping has no SwiftChat equivalent, so sections are
+    flattened — each item's `"title"` is prefixed onto its options'
+    `"title"` when there is more than one section, so the user can still
+    tell sections apart in a flat button list). This is a lossy mapping
+    (no section headers, no per-item subtitle) but is the only one of
+    SwiftChat's two multi-option shapes that doesn't require an
+    unavailable field.
+
+  - Glific `location_request_message` (the third interactive type per
+    `Glific.Enums.InteractiveMessageType`) has **no SwiftChat equivalent**
+    anywhere in the documented message-type palette (spike notes list
+    card/article/rich-input/action/location/scorecard/video-stream, none
+    of which round-trips a location *request*, only an outgoing location
+    pin) -> fails loudly via `Glific.log_error/2` naming the unsupported
+    variant, per this task's hard requirement not to guess a payload.
+
+  Buttons carry no `icon`/`type` concept in Glific's interactive content,
+  so both are set to SwiftChat's plain-text button defaults
+  (`icon: ""`, `type: "text"`) — mirrors how `caption/1` defaults an
+  absent Glific field to an empty string elsewhere in this module.
+  `reply` (the value echoed back on tap, per the Postman body) is set to
+  the button's own title, since Glific's quick-reply/list options carry
+  no separate reply-payload field distinct from the display title.
+  """
   @impl Glific.Providers.MessageBehaviour
-  @spec send_interactive(Message.t(), map()) :: {:ok, Oban.Job.t()} | {:error, Ecto.Changeset.t()}
-  def send_interactive(_message, _attrs \\ %{}), do: Glific.log_error(@not_implemented)
+  @spec send_interactive(Message.t(), map()) ::
+          {:ok, Oban.Job.t()} | {:error, Ecto.Changeset.t()} | {:error, String.t()}
+  def send_interactive(message, attrs \\ %{}) do
+    interactive_content = message.interactive_content
+
+    case interactive_content["type"] do
+      "quick_reply" ->
+        build_button_payload(interactive_content)
+        |> put_destination(message)
+        |> send_message(message, attrs)
+
+      "list" ->
+        build_multi_select_button_payload(interactive_content)
+        |> put_destination(message)
+        |> send_message(message, attrs)
+
+      other_type ->
+        Glific.log_error(
+          "SwiftChat: unsupported interactive message variant #{other_type || "nil"} for message id #{message.id} — no SwiftChat equivalent exists (see send_interactive/2 moduledoc), send skipped"
+        )
+    end
+  end
 
   @doc """
   Normalizes an inbound SwiftChat `text` webhook payload into Glific's
@@ -334,35 +406,85 @@ defmodule Glific.Providers.Swiftchat.Message do
   def receive_location(_params), do: raise(RuntimeError, message: @not_implemented)
 
   @doc """
-  Normalizes an inbound SwiftChat `button_response` webhook payload
-  (button-reply — the reply body text that advances a flow). Shape
-  confirmed from the spike notes:
+  Normalizes an inbound SwiftChat interactive-reply webhook payload — one
+  of `button_response`, `multi_select_button_response`, or
+  `persistent_menu_response` — into Glific's standard inbound-message map.
+  All three share the same envelope, keyed by `params["type"]`, and land
+  the type-specific payload under that same key. Shapes confirmed
+  (`docs/prds/PRD-001-spike-notes.md` §3):
 
-      %{"from" => "...", "message_id" => "...",
-        "button_response" => %{"button_index" => 1, "body" => "Class 1"}}
+      button_response:               {"button_index": 1, "body": "Class 1"}
+      multi_select_button_response:  [{"button_index": 1, "body": "..."}, ...]
+      persistent_menu_response:      {"id": "...", "body": "..."}
 
-  `multi_select_button_response` and `persistent_menu_response` share the
-  same envelope but carry richer payloads (a list, or an `id` field) —
-  those are left for T-09 (interactive messages) to map onto Glific's
-  interactive-content shape; this function handles the single
-  `button_response` case only, which is cheap to land alongside T-05
-  because it needs nothing beyond the confirmed envelope.
+  **`button_response`** (T-05): `body` is used directly as the reply text.
+
+  **`multi_select_button_response`** (T-09): a *list* of `{button_index,
+  body}` selections — there is no single `body` to lift. No other Glific
+  BSP provider has a genuine multi-select inbound reply to set a
+  precedent from (Gupshup/Maytapi's `receive_interactive/1` both handle
+  single-selection replies only — grepped, confirmed), so this joins the
+  selected bodies with `", "` into one reply string — a comparable join
+  convention already exists for checkbox-style answers in
+  `Flows.Router.update_context_results/4`
+  (`msg.body |> Glific.make_set() |> MapSet.to_list()`, `lib/glific/flows/router.ex`),
+  which likewise collapses a set of selections into one `msg.body`-shaped
+  answer — chosen so a flow's `@results.<key>.input` reads as a single
+  human-readable line rather than forcing every downstream flow node to
+  know it should parse a list.
+
+  **`persistent_menu_response`** (T-09): `body` is used directly as the
+  reply text, same as `button_response` — it is a single-selection menu
+  reply, just from a different UI surface (SwiftChat's persistent menu
+  vs. an inline button).
+
+  `interactive_content` always carries the raw type-specific payload so a
+  flow's interactive-result handling (`Flows.Router.update_context_results/4`,
+  which merges `msg.interactive_content` into flow results for
+  `:quick_reply`/`:list` message types) has the original shape available,
+  not just the derived body string. `Messages.Message.interactive_content`
+  is an Ecto `:map` field (`field(:interactive_content, :map, ...)`,
+  `lib/glific/messages/message.ex`) — a bare list fails to cast (silently,
+  via `handle_inbound_create_result/2`'s changeset-error branch, which
+  logs and drops the message rather than raising) — so
+  `multi_select_button_response`'s list payload is wrapped under a
+  `"selections"` key rather than stored as a raw list.
   """
   @impl Glific.Providers.MessageBehaviour
   @spec receive_interactive(payload :: map()) :: map()
   def receive_interactive(params) do
-    button_response = params["button_response"] || %{}
+    type = params["type"]
+    interactive_payload = params[type]
 
     %{
       bsp_message_id: params["message_id"],
-      body: button_response["body"],
-      interactive_content: button_response,
+      body: interactive_reply_body(type, interactive_payload),
+      interactive_content: wrap_interactive_content(interactive_payload),
       sender: %{
         phone: params["from"],
         name: params["from"]
       }
     }
   end
+
+  @spec wrap_interactive_content(list() | map() | nil) :: map()
+  defp wrap_interactive_content(selections) when is_list(selections),
+    do: %{"selections" => selections}
+
+  defp wrap_interactive_content(payload) when is_map(payload), do: payload
+  defp wrap_interactive_content(_payload), do: %{}
+
+  @spec interactive_reply_body(String.t() | nil, list() | map() | nil) :: String.t()
+  defp interactive_reply_body("multi_select_button_response", selections)
+       when is_list(selections) do
+    selections
+    |> Enum.map(& &1["body"])
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(", ")
+  end
+
+  defp interactive_reply_body(_type, payload) when is_map(payload), do: payload["body"]
+  defp interactive_reply_body(_type, _payload), do: nil
 
   @doc false
   @impl Glific.Providers.MessageBehaviour
@@ -383,6 +505,104 @@ defmodule Glific.Providers.Swiftchat.Message do
   @spec caption(nil | String.t()) :: String.t()
   defp caption(nil), do: ""
   defp caption(caption), do: caption
+
+  # Builds a SwiftChat `type: "button"` payload from a Glific `quick_reply`
+  # interactive_content map. Shape confirmed from the Postman collection's
+  # `Message > Send-Button-Message`:
+  #
+  #     {"type": "button", "button": {"body": {"type": "text", "text": {"body": "..."}},
+  #      "buttons": [{"icon", "type", "body", "reply"}, ...], "allow_custom_response": false},
+  #      "rating_type": "thumb"}
+  #
+  # `interactive_content["content"]["text"]` is Glific's quick_reply body text
+  # (see `lib/glific/seeds/seeds_flows.ex`); `interactive_content["options"]`
+  # is the flat list of `{"type", "title"}` reply buttons.
+  @spec build_button_payload(map()) :: map()
+  defp build_button_payload(interactive_content) do
+    body_text = get_in(interactive_content, ["content", "text"]) || ""
+    options = interactive_content["options"] || []
+
+    %{
+      "type" => "button",
+      "button" => %{
+        "body" => %{"type" => "text", "text" => %{"body" => body_text}},
+        "buttons" => Enum.map(options, &option_to_button/1),
+        "allow_custom_response" => false
+      },
+      "rating_type" => "thumb"
+    }
+  end
+
+  # Builds a SwiftChat `type: "button"` / `multi_select_button` payload from
+  # a Glific `list` interactive_content map. Shape confirmed from the
+  # Postman collection's `Message > Send-Multi-Select-Button-Message`:
+  #
+  #     {"type": "button", "multi_select_button": {"body": {"type": "text", "text": {"body": "..."}},
+  #      "multi_select_button": [{"icon", "type", "body", "reply"}, ...],
+  #      "allow_custom_response": false}, "rating_type": "thumb"}
+  #
+  # See `send_interactive/2`'s moduledoc for why `list` maps here and not to
+  # `card` (card requires a mandatory per-card image id that Glific's list
+  # content never carries). WhatsApp-list "sections" (`items[]`, each with
+  # its own `options[]`) have no SwiftChat equivalent, so they are
+  # flattened into one button list; when there is more than one section its
+  # title is prefixed onto each of its options' titles so the grouping
+  # isn't silently lost.
+  @spec build_multi_select_button_payload(map()) :: map()
+  defp build_multi_select_button_payload(interactive_content) do
+    body_text = interactive_content["body"] || interactive_content["title"] || ""
+    items = interactive_content["items"] || []
+
+    flatten_multiple_sections? = length(items) > 1
+
+    buttons =
+      items
+      |> Enum.flat_map(fn item ->
+        section_title = item["title"]
+        options = item["options"] || []
+
+        Enum.map(options, fn option ->
+          option
+          |> maybe_prefix_section_title(section_title, flatten_multiple_sections?)
+          |> option_to_button()
+        end)
+      end)
+
+    %{
+      "type" => "button",
+      "multi_select_button" => %{
+        "body" => %{"type" => "text", "text" => %{"body" => body_text}},
+        "multi_select_button" => buttons,
+        "allow_custom_response" => false
+      },
+      "rating_type" => "thumb"
+    }
+  end
+
+  @spec maybe_prefix_section_title(map(), String.t() | nil, boolean()) :: map()
+  defp maybe_prefix_section_title(option, section_title, true)
+       when is_binary(section_title) and section_title != "" do
+    Map.update(option, "title", section_title, &"#{section_title}: #{&1}")
+  end
+
+  defp maybe_prefix_section_title(option, _section_title, _flatten?), do: option
+
+  # A Glific quick_reply/list option (`{"type", "title"}`) carries no
+  # separate SwiftChat `icon`/`reply` concept — `icon` defaults to empty,
+  # `type` to SwiftChat's plain-text button type, and `reply` (the value
+  # echoed back on tap) to the option's own title, since Glific has no
+  # separate reply-payload field distinct from the display title.
+  @spec option_to_button(map()) :: map()
+  defp option_to_button(option) do
+    title = option["title"] || ""
+
+    %{
+      "icon" => "",
+      "type" => "text",
+      "body" => title,
+      "reply" => title
+    }
+  end
 
   # 64 MB, confirmed max media size (`docs/prds/PRD-001-spike-notes.md` §4).
   # No shared per-BSP size-validation mechanism exists to plug into:

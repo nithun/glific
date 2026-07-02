@@ -161,12 +161,195 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
     end
   end
 
-  describe "unimplemented callbacks (T-09/T-10 scope, not built here)" do
-    test "send_interactive/2 fails loudly instead of guessing an unconfirmed payload shape",
+  describe "send_interactive/2 (T-09): quick_reply -> button" do
+    @quick_reply_content %{
+      "type" => "quick_reply",
+      "content" => %{
+        "text" => "What do you want to do today?",
+        "type" => "text",
+        "header" => "Profile Selection"
+      },
+      "options" => [
+        %{"type" => "text", "title" => "Create New Profile"},
+        %{"type" => "text", "title" => "Select Profile"}
+      ]
+    }
+
+    test "builds the confirmed button payload field-by-field and enqueues the send", attrs do
+      sender = Fixtures.contact_fixture(attrs)
+      receiver = Fixtures.contact_fixture(attrs)
+
+      message =
+        Fixtures.message_fixture(%{
+          organization_id: attrs.organization_id,
+          sender_id: sender.id,
+          receiver_id: receiver.id,
+          type: :quick_reply,
+          interactive_content: @quick_reply_content,
+          flow: :outbound
+        })
+        |> Repo.preload([:receiver], force: true)
+
+      assert {:ok, %Oban.Job{args: %{payload: payload}} = job} =
+               Glific.Providers.Swiftchat.Message.send_interactive(message)
+
+      assert payload["type"] == "button"
+      assert payload["rating_type"] == "thumb"
+      assert get_in(payload, ["button", "body", "type"]) == "text"
+
+      assert get_in(payload, ["button", "body", "text", "body"]) ==
+               "What do you want to do today?"
+
+      assert get_in(payload, ["button", "allow_custom_response"]) == false
+
+      assert get_in(payload, ["button", "buttons"]) == [
+               %{
+                 "icon" => "",
+                 "type" => "text",
+                 "body" => "Create New Profile",
+                 "reply" => "Create New Profile"
+               },
+               %{
+                 "icon" => "",
+                 "type" => "text",
+                 "body" => "Select Profile",
+                 "reply" => "Select Profile"
+               }
+             ]
+
+      assert_enqueued(worker: Worker, prefix: attrs.global_schema)
+      Oban.drain_queue(queue: :swiftchat)
+
+      message = Messages.get_message!(message.id)
+      assert message.bsp_message_id != nil
+      assert job.args.payload["to"] == receiver.phone
+    end
+  end
+
+  describe "send_interactive/2 (T-09): list -> multi_select_button" do
+    @list_content %{
+      "type" => "list",
+      "title" => "Interactive list",
+      "body" => "Please choose an option",
+      "globalButtons" => [%{"type" => "text", "title" => "Menu"}],
+      "items" => [
+        %{
+          "title" => "Item Title",
+          "subtitle" => "Subtitle",
+          "options" => [
+            %{"type" => "text", "title" => "Option 1"},
+            %{"type" => "text", "title" => "Option 2"}
+          ]
+        }
+      ]
+    }
+
+    test "builds the confirmed multi_select_button payload field-by-field", attrs do
+      sender = Fixtures.contact_fixture(attrs)
+      receiver = Fixtures.contact_fixture(attrs)
+
+      message =
+        Fixtures.message_fixture(%{
+          organization_id: attrs.organization_id,
+          sender_id: sender.id,
+          receiver_id: receiver.id,
+          type: :list,
+          interactive_content: @list_content,
+          flow: :outbound
+        })
+        |> Repo.preload([:receiver], force: true)
+
+      assert {:ok, %Oban.Job{args: %{payload: payload}}} =
+               Glific.Providers.Swiftchat.Message.send_interactive(message)
+
+      assert payload["type"] == "button"
+      assert payload["rating_type"] == "thumb"
+
+      assert get_in(payload, ["multi_select_button", "body", "text", "body"]) ==
+               "Please choose an option"
+
+      assert get_in(payload, ["multi_select_button", "allow_custom_response"]) == false
+
+      # single section: no section-title prefix applied
+      assert get_in(payload, ["multi_select_button", "multi_select_button"]) == [
+               %{"icon" => "", "type" => "text", "body" => "Option 1", "reply" => "Option 1"},
+               %{"icon" => "", "type" => "text", "body" => "Option 2", "reply" => "Option 2"}
+             ]
+
+      assert_enqueued(worker: Worker, prefix: attrs.global_schema)
+    end
+
+    test "flattens multiple sections and prefixes each option with its section title", attrs do
+      sender = Fixtures.contact_fixture(attrs)
+      receiver = Fixtures.contact_fixture(attrs)
+
+      multi_section_content =
+        put_in(@list_content["items"], [
+          %{
+            "title" => "Classes",
+            "options" => [%{"type" => "text", "title" => "Class 1"}]
+          },
+          %{
+            "title" => "Grades",
+            "options" => [%{"type" => "text", "title" => "Grade A"}]
+          }
+        ])
+
+      message =
+        Fixtures.message_fixture(%{
+          organization_id: attrs.organization_id,
+          sender_id: sender.id,
+          receiver_id: receiver.id,
+          type: :list,
+          interactive_content: multi_section_content,
+          flow: :outbound
+        })
+        |> Repo.preload([:receiver], force: true)
+
+      assert {:ok, %Oban.Job{args: %{payload: payload}}} =
+               Glific.Providers.Swiftchat.Message.send_interactive(message)
+
+      assert get_in(payload, ["multi_select_button", "multi_select_button"]) == [
+               %{
+                 "icon" => "",
+                 "type" => "text",
+                 "body" => "Classes: Class 1",
+                 "reply" => "Classes: Class 1"
+               },
+               %{
+                 "icon" => "",
+                 "type" => "text",
+                 "body" => "Grades: Grade A",
+                 "reply" => "Grades: Grade A"
+               }
+             ]
+    end
+  end
+
+  describe "send_interactive/2 (T-09): unmappable variant fails loudly" do
+    test "location_request_message has no SwiftChat equivalent and is rejected, not guessed",
          attrs do
-      message = Fixtures.message_fixture(attrs)
+      sender = Fixtures.contact_fixture(attrs)
+      receiver = Fixtures.contact_fixture(attrs)
+
+      message =
+        Fixtures.message_fixture(%{
+          organization_id: attrs.organization_id,
+          sender_id: sender.id,
+          receiver_id: receiver.id,
+          type: :location_request_message,
+          interactive_content: %{
+            "type" => "location_request_message",
+            "body" => %{"type" => "text", "text" => "Please share your location"},
+            "action" => %{"name" => "send_location"}
+          },
+          flow: :outbound
+        })
+
       assert {:error, error_msg} = Glific.Providers.Swiftchat.Message.send_interactive(message)
-      assert error_msg =~ "not implemented"
+      assert error_msg =~ "unsupported interactive"
+      assert error_msg =~ "location_request_message"
+      refute_enqueued(worker: Worker, prefix: attrs.global_schema)
     end
   end
 
@@ -402,6 +585,92 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
                interactive_content: %{"button_index" => 1, "body" => "Class 1"},
                sender: %{phone: "+919917443994"}
              } = Glific.Providers.Swiftchat.Message.receive_interactive(payload)
+    end
+  end
+
+  describe "receive_interactive/1 (T-09: multi_select_button_response)" do
+    test "joins selected bodies into one comma-separated reply text" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "multi_select_button_response",
+        "message_id" => "swiftchat-msg-4",
+        "multi_select_button_response" => [
+          %{"button_index" => 1, "body" => "Class 1"},
+          %{"button_index" => 2, "body" => "Class 2"}
+        ]
+      }
+
+      assert %{
+               bsp_message_id: "swiftchat-msg-4",
+               body: "Class 1, Class 2",
+               interactive_content: %{
+                 "selections" => [
+                   %{"button_index" => 1, "body" => "Class 1"},
+                   %{"button_index" => 2, "body" => "Class 2"}
+                 ]
+               },
+               sender: %{phone: "+919917443994"}
+             } = Glific.Providers.Swiftchat.Message.receive_interactive(payload)
+    end
+
+    test "a single selection still joins cleanly (no trailing separator)" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "multi_select_button_response",
+        "message_id" => "swiftchat-msg-5",
+        "multi_select_button_response" => [%{"button_index" => 1, "body" => "Only Option"}]
+      }
+
+      assert %{body: "Only Option"} =
+               Glific.Providers.Swiftchat.Message.receive_interactive(payload)
+    end
+
+    test "tolerates unknown/new keys inside the selection entries without crashing" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "multi_select_button_response",
+        "message_id" => "swiftchat-msg-6",
+        "multi_select_button_response" => [
+          %{"button_index" => 1, "body" => "Class 1", "a_future_field" => "value"}
+        ],
+        "another_new_envelope_key" => %{"nested" => true}
+      }
+
+      assert %{body: "Class 1"} = Glific.Providers.Swiftchat.Message.receive_interactive(payload)
+    end
+  end
+
+  describe "receive_interactive/1 (T-09: persistent_menu_response)" do
+    test "normalizes a persistent_menu_response webhook, using body as the reply text" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "persistent_menu_response",
+        "message_id" => "swiftchat-msg-7",
+        "persistent_menu_response" => %{"id" => "menu-item-1", "body" => "Talk to a human"}
+      }
+
+      assert %{
+               bsp_message_id: "swiftchat-msg-7",
+               body: "Talk to a human",
+               interactive_content: %{"id" => "menu-item-1", "body" => "Talk to a human"},
+               sender: %{phone: "+919917443994"}
+             } = Glific.Providers.Swiftchat.Message.receive_interactive(payload)
+    end
+
+    test "tolerates unknown/new keys in the persistent_menu_response payload without crashing" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "persistent_menu_response",
+        "message_id" => "swiftchat-msg-8",
+        "persistent_menu_response" => %{
+          "id" => "menu-item-1",
+          "body" => "Talk to a human",
+          "a_future_field" => "value"
+        }
+      }
+
+      assert %{body: "Talk to a human"} =
+               Glific.Providers.Swiftchat.Message.receive_interactive(payload)
     end
   end
 end
