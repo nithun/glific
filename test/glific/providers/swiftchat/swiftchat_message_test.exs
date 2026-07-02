@@ -161,17 +161,68 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
     end
   end
 
-  describe "unimplemented callbacks (T-05/T-08/T-09/T-10 scope, not built here)" do
+  describe "unimplemented callbacks (T-08/T-09/T-10 scope, not built here)" do
     test "send_image/2 fails loudly instead of guessing an unconfirmed payload shape", attrs do
       message = Fixtures.message_fixture(attrs)
       assert {:error, error_msg} = Glific.Providers.Swiftchat.Message.send_image(message)
       assert error_msg =~ "not implemented"
     end
 
-    test "receive_text/1 raises instead of silently normalizing an unconfirmed webhook shape" do
+    test "receive_media/1 raises instead of silently normalizing an unconfirmed webhook shape" do
       assert_raise RuntimeError, ~r/not implemented/, fn ->
-        Glific.Providers.Swiftchat.Message.receive_text(%{"payload" => %{}})
+        Glific.Providers.Swiftchat.Message.receive_media(%{})
       end
+    end
+  end
+
+  describe "receive_text/1 (T-05 scope)" do
+    test "normalizes the confirmed SwiftChat text webhook envelope" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "text",
+        "timestamp" => 1_707_216_634,
+        "message_id" => "swiftchat-msg-1",
+        "conversation_id" => "conv-1",
+        "conversation_initiated_by" => "user",
+        "text" => %{"body" => "Hi"}
+      }
+
+      assert %{
+               bsp_message_id: "swiftchat-msg-1",
+               body: "Hi",
+               sender: %{phone: "+919917443994", name: "+919917443994"}
+             } = Glific.Providers.Swiftchat.Message.receive_text(payload)
+    end
+
+    test "tolerates unknown/new envelope keys without crashing" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "text",
+        "message_id" => "swiftchat-msg-2",
+        "text" => %{"body" => "Hi"},
+        "a_future_field" => %{"nested" => "value"}
+      }
+
+      assert %{bsp_message_id: "swiftchat-msg-2", body: "Hi"} =
+               Glific.Providers.Swiftchat.Message.receive_text(payload)
+    end
+  end
+
+  describe "receive_interactive/1 (T-05 scope: button_response only)" do
+    test "normalizes a button_response webhook" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "button_response",
+        "message_id" => "swiftchat-msg-3",
+        "button_response" => %{"button_index" => 1, "body" => "Class 1"}
+      }
+
+      assert %{
+               bsp_message_id: "swiftchat-msg-3",
+               body: "Class 1",
+               interactive_content: %{"button_index" => 1, "body" => "Class 1"},
+               sender: %{phone: "+919917443994"}
+             } = Glific.Providers.Swiftchat.Message.receive_interactive(payload)
     end
   end
 end

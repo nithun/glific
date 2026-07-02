@@ -2,16 +2,12 @@ defmodule Glific.Providers.Swiftchat.Message do
   @moduledoc """
   Message API layer between application and SwiftChat.
 
-  Scope (PRD-001-tasks T-04): `send_text/2` only. Media, interactive,
-  sticker/audio-fallback, and template sends are separate later tasks
-  (T-08/T-09/T-10) and are NOT implemented here — each unimplemented
-  callback returns a logged `{:error, "not implemented"}` rather than
-  silently building a wrong payload, so an accidental call fails loudly
-  instead of hitting a guessed, unconfirmed endpoint shape.
-
-  Inbound normalizers (`receive_*/1`) are T-05 (inbound stack) and are also
-  NOT implemented here; the `@behaviour` callbacks are still declared for
-  compile-time contract coverage, returning a clear error instead.
+  Implemented so far: `send_text/2` (T-04), `receive_text/1` and
+  `receive_interactive/1` for button replies (T-05). Media, remaining
+  interactive subtypes, sticker/audio-fallback, and template sends are
+  later tasks (T-08/T-09/T-10) — each unimplemented callback fails loudly
+  (logged error or raise) rather than silently building a wrong payload
+  against an unconfirmed endpoint shape.
   """
 
   @behaviour Glific.Providers.MessageBehaviour
@@ -84,10 +80,51 @@ defmodule Glific.Providers.Swiftchat.Message do
   @spec send_interactive(Message.t(), map()) :: {:ok, Oban.Job.t()} | {:error, Ecto.Changeset.t()}
   def send_interactive(_message, _attrs \\ %{}), do: Glific.log_error(@not_implemented)
 
-  @doc false
+  @doc """
+  Normalizes an inbound SwiftChat `text` webhook payload into Glific's
+  standard inbound-message map.
+
+  Envelope shape confirmed from the official Postman collection
+  (`docs/prds/PRD-001-spike-notes.md` §3):
+
+      %{
+        "from" => "+91XXXXXXXXXX",
+        "type" => "text",
+        "timestamp" => ...,
+        "message_id" => "...",
+        "conversation_id" => "...",
+        "conversation_initiated_by" => "...",
+        "text" => %{"body" => "..."}
+      }
+
+  `from` is the user's real phone (ADR-001 primary branch, confirmed) —
+  used directly as `sender.phone`, no synthetic phone / contact_type
+  change. SwiftChat sends **no profile-name field** anywhere in the
+  documented envelope (unlike Gupshup's `sender.name`) — `Contact.name`
+  is optional at the schema level (`@optional_fields`, no
+  `validate_required`), so leaving it nil would be valid, but a nameless
+  contact is poor UX everywhere Glific displays a contact list/search
+  result. We fall back to the phone number as the display name, the same
+  fallback Glific already uses as its "no better name available" default
+  (see `Contacts.simulator_contact?`/seed data patterns) — this is a
+  display default we choose, not a field invented in the payload.
+
+  Docs note new envelope/payload keys may appear over time — this
+  normalizer reads only the documented keys and ignores everything else,
+  so unknown extra keys never crash it.
+  """
   @impl Glific.Providers.MessageBehaviour
   @spec receive_text(payload :: map()) :: map()
-  def receive_text(_params), do: raise(RuntimeError, message: @not_implemented)
+  def receive_text(params) do
+    %{
+      bsp_message_id: params["message_id"],
+      body: get_in(params, ["text", "body"]),
+      sender: %{
+        phone: params["from"],
+        name: params["from"]
+      }
+    }
+  end
 
   @doc false
   @impl Glific.Providers.MessageBehaviour
@@ -99,10 +136,36 @@ defmodule Glific.Providers.Swiftchat.Message do
   @spec receive_location(payload :: map()) :: map()
   def receive_location(_params), do: raise(RuntimeError, message: @not_implemented)
 
-  @doc false
+  @doc """
+  Normalizes an inbound SwiftChat `button_response` webhook payload
+  (button-reply — the reply body text that advances a flow). Shape
+  confirmed from the spike notes:
+
+      %{"from" => "...", "message_id" => "...",
+        "button_response" => %{"button_index" => 1, "body" => "Class 1"}}
+
+  `multi_select_button_response` and `persistent_menu_response` share the
+  same envelope but carry richer payloads (a list, or an `id` field) —
+  those are left for T-09 (interactive messages) to map onto Glific's
+  interactive-content shape; this function handles the single
+  `button_response` case only, which is cheap to land alongside T-05
+  because it needs nothing beyond the confirmed envelope.
+  """
   @impl Glific.Providers.MessageBehaviour
   @spec receive_interactive(payload :: map()) :: map()
-  def receive_interactive(_params), do: raise(RuntimeError, message: @not_implemented)
+  def receive_interactive(params) do
+    button_response = params["button_response"] || %{}
+
+    %{
+      bsp_message_id: params["message_id"],
+      body: button_response["body"],
+      interactive_content: button_response,
+      sender: %{
+        phone: params["from"],
+        name: params["from"]
+      }
+    }
+  end
 
   @doc false
   @impl Glific.Providers.MessageBehaviour

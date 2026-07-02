@@ -118,6 +118,7 @@ defmodule GlificWeb.Router do
     forward("/gupshup", Providers.Gupshup.Plugs.Shunt)
     forward("/gupshup-enterprise", Providers.Gupshup.Enterprise.Plugs.Shunt)
     forward("/maytapi", Providers.Maytapi.Plugs.Shunt)
+    forward("/swiftchat", Providers.Swiftchat.Plugs.Shunt)
   end
 
   # """
