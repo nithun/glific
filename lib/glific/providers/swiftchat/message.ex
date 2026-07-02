@@ -668,16 +668,21 @@ defmodule Glific.Providers.Swiftchat.Message do
 
   # A Glific quick_reply/list option (`{"type", "title"}`) carries no
   # separate SwiftChat `icon`/`reply` concept — `icon` defaults to empty,
-  # `type` to SwiftChat's plain-text button type, and `reply` (the value
-  # echoed back on tap) to the option's own title, since Glific has no
-  # separate reply-payload field distinct from the display title.
+  # and `reply` (the value echoed back on tap) to the option's own title,
+  # since Glific has no separate reply-payload field distinct from the
+  # display title. `type` is the button's VISUAL style, not a content
+  # type: the live API rejects anything but "solid" or "dotted"
+  # (400 code-1: `"button.buttons[0].type" must be one of [solid, dotted]`
+  # — discovered in the 2026-07-02 live round-trip; the Postman
+  # collection's `<button-type>` placeholder documents no enum). "solid"
+  # is the default style.
   @spec option_to_button(map()) :: map()
   defp option_to_button(option) do
     title = option["title"] || ""
 
     %{
       "icon" => "",
-      "type" => "text",
+      "type" => "solid",
       "body" => title,
       "reply" => title
     }

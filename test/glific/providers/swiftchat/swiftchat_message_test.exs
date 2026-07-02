@@ -203,16 +203,18 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
 
       assert get_in(payload, ["button", "allow_custom_response"]) == false
 
+      # button "type" is the visual style — live API enum is [solid, dotted]
+      # (400 code-1 discovered in the 2026-07-02 live round-trip)
       assert get_in(payload, ["button", "buttons"]) == [
                %{
                  "icon" => "",
-                 "type" => "text",
+                 "type" => "solid",
                  "body" => "Create New Profile",
                  "reply" => "Create New Profile"
                },
                %{
                  "icon" => "",
-                 "type" => "text",
+                 "type" => "solid",
                  "body" => "Select Profile",
                  "reply" => "Select Profile"
                }
@@ -273,8 +275,8 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
 
       # single section: no section-title prefix applied
       assert get_in(payload, ["multi_select_button", "multi_select_button"]) == [
-               %{"icon" => "", "type" => "text", "body" => "Option 1", "reply" => "Option 1"},
-               %{"icon" => "", "type" => "text", "body" => "Option 2", "reply" => "Option 2"}
+               %{"icon" => "", "type" => "solid", "body" => "Option 1", "reply" => "Option 1"},
+               %{"icon" => "", "type" => "solid", "body" => "Option 2", "reply" => "Option 2"}
              ]
 
       assert_enqueued(worker: Worker, prefix: attrs.global_schema)
@@ -313,13 +315,13 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
       assert get_in(payload, ["multi_select_button", "multi_select_button"]) == [
                %{
                  "icon" => "",
-                 "type" => "text",
+                 "type" => "solid",
                  "body" => "Classes: Class 1",
                  "reply" => "Classes: Class 1"
                },
                %{
                  "icon" => "",
-                 "type" => "text",
+                 "type" => "solid",
                  "body" => "Grades: Grade A",
                  "reply" => "Grades: Grade A"
                }

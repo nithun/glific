@@ -16,8 +16,13 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
   @swiftchat_url "https://v1-api.swiftchat.ai/api"
 
   use Tesla
-  # you can add , log_level: :debug to the below if you want debugging info
-  plug(Tesla.Middleware.Logger)
+  # you can add , log_level: :debug to the below if you want debugging info.
+  # filter_headers is NOT optional: without it, Tesla's debug logging prints
+  # the full `authorization: Bearer <api-key>` request header into the dev
+  # log (observed live 2026-07-02) — an L-003-class credential leak that
+  # SafeLog can't catch because it happens inside Tesla's own middleware,
+  # not in our error handling.
+  plug(Tesla.Middleware.Logger, filter_headers: ["authorization"])
   plug(Tesla.Middleware.JSON)
 
   defmodule Error do
