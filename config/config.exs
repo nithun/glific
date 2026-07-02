@@ -62,7 +62,11 @@ oban_queues = [
   ],
   contact_import: 10,
   gupshup_high_tps: 10,
-  clone_assistant: 5
+  clone_assistant: 5,
+  # SwiftChat BSP outbound queue (PRD-001, ADR-002). Limit is a starting
+  # point mirroring `gupshup:` — tune once SwiftChat's real rate limits
+  # are known (PRD-001-tasks.md Open Questions Q2).
+  swiftchat: 10
 ]
 
 oban_crontab = [
