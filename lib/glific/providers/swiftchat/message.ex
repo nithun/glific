@@ -667,21 +667,22 @@ defmodule Glific.Providers.Swiftchat.Message do
   defp maybe_prefix_section_title(option, _section_title, _flatten?), do: option
 
   # A Glific quick_reply/list option (`{"type", "title"}`) carries no
-  # separate SwiftChat `icon`/`reply` concept — `icon` defaults to empty,
-  # and `reply` (the value echoed back on tap) to the option's own title,
-  # since Glific has no separate reply-payload field distinct from the
-  # display title. `type` is the button's VISUAL style, not a content
-  # type: the live API rejects anything but "solid" or "dotted"
-  # (400 code-1: `"button.buttons[0].type" must be one of [solid, dotted]`
-  # — discovered in the 2026-07-02 live round-trip; the Postman
-  # collection's `<button-type>` placeholder documents no enum). "solid"
-  # is the default style.
+  # separate SwiftChat `icon`/`reply` concept — `reply` (the value echoed
+  # back on tap) is the option's own title, since Glific has no separate
+  # reply-payload field distinct from the display title. Two live-API
+  # constraints the Postman placeholders (`<button-type>`, `<button-icon>`)
+  # never documented, both discovered in the 2026-07-02 live round-trip:
+  # `type` is a VISUAL style with enum [solid, dotted] (400 code-1), and
+  # `icon` is REQUIRED non-empty (400 code-1 "icon is not allowed to be
+  # empty") with "registration" confirmed accepted live (201) — matching
+  # the docs' error-11 hint ("Allowed icon formats are registration and
+  # edit-registration").
   @spec option_to_button(map()) :: map()
   defp option_to_button(option) do
     title = option["title"] || ""
 
     %{
-      "icon" => "",
+      "icon" => "registration",
       "type" => "solid",
       "body" => title,
       "reply" => title
