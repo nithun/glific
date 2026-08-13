@@ -166,6 +166,55 @@ defmodule Glific.Providers.Swiftchat.ApiClientTest do
 
       assert error_msg =~ "API Key and Bot ID"
     end
+
+    test "F-079: rejects a malicious/non-conforming media_id before ever calling the BSP",
+         attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn _env ->
+        flunk("BSP should not have been called with a non-conforming media_id")
+      end)
+
+      # path traversal / host-confusion attempt smuggled through the
+      # unsigned inbound webhook's media id field.
+      assert {:error, error_msg} =
+               ApiClient.get_media_url(
+                 attrs.organization_id,
+                 "../../merchants/other-merchant/templates"
+               )
+
+      assert error_msg =~ "Invalid SwiftChat media id"
+    end
+
+    test "F-079: rejects a media_id carrying a second host / query-string injection", attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn _env ->
+        flunk("BSP should not have been called with a non-conforming media_id")
+      end)
+
+      assert {:error, error_msg} =
+               ApiClient.get_media_url(
+                 attrs.organization_id,
+                 "abc?redirect=https://evil.example.com"
+               )
+
+      assert error_msg =~ "Invalid SwiftChat media id"
+    end
+
+    test "F-079: rejects a non-binary media_id (unexpected webhook shape) without raising",
+         attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn _env ->
+        flunk("BSP should not have been called with a non-binary media_id")
+      end)
+
+      assert {:error, error_msg} =
+               ApiClient.get_media_url(attrs.organization_id, %{"unexpected" => "shape"})
+
+      assert error_msg =~ "Invalid SwiftChat media id"
+    end
   end
 
   describe "get_bot_configuration/2 (PRD-003 F-2: live credential-verification ping)" do

@@ -526,6 +526,35 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
       assert message.media.url == "unresolved://media-id-1"
       assert message.media.source_url == "unresolved://media-id-1"
     end
+
+    test "F-079: a malicious media_id shape is rejected before the authenticated BSP fetch, message still stored with a sentinel URL",
+         %{conn: conn, organization_id: organization_id} do
+      :ok = activate_swiftchat(organization_id)
+
+      Tesla.Mock.mock(fn
+        %{method: :get} ->
+          flunk("BSP should not have been called with a non-conforming media_id")
+      end)
+
+      malicious_webhook =
+        @image_webhook
+        |> Map.put("message_id", "swiftchat-msg-image-malicious-id")
+        |> put_in(["image", "id"], "../../merchants/other-merchant/templates")
+
+      conn = post(conn, "/swiftchat", malicious_webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-image-malicious-id",
+          organization_id: organization_id
+        })
+
+      message = Repo.preload(message, :media)
+      assert %MessageMedia{} = message.media
+      assert message.media.url =~ "unresolved://"
+      assert message.media.source_url =~ "unresolved://"
+    end
   end
 
   describe "flow advancement (T-05/T-09 AC: inbound reply advances a flow)" do

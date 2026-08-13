@@ -137,7 +137,7 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageController do
   defp media_type("audio"), do: :audio
   defp media_type(_type), do: :document
 
-  @spec resolve_media_url(non_neg_integer(), String.t() | nil) :: String.t() | nil
+  @spec resolve_media_url(non_neg_integer(), term()) :: String.t() | nil
   defp resolve_media_url(_organization_id, nil), do: nil
 
   defp resolve_media_url(organization_id, media_id) do

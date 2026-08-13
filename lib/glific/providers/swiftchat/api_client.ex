@@ -104,13 +104,59 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
   `docs/prds/PRD-001-spike-notes.md` §4 in the planning repo. Callers must
   resolve promptly (T-08 resolves at receive time, in the controller) —
   do not cache/store this call's result for later reuse.
+
+  **F-079 (security):** `media_id` originates from the UNSIGNED inbound
+  SwiftChat webhook (`message_controller.ex:116-131` reads
+  `params[type]["id"]` straight off the request body — URL-obscurity is
+  the only protection, per spike-notes Q3) and is string-concatenated
+  below into an authenticated GET carrying the org's live Bearer token —
+  a confused-deputy/path-injection vector unique to SwiftChat (Gupshup/
+  Maytapi never build outbound URLs from webhook data). `media_id` is
+  therefore validated against the expected opaque-identifier shape
+  (bounded-length alphanumeric/hyphen/underscore, the actual SwiftChat
+  media-id shape not being documented anywhere more specifically) before
+  it ever reaches the URL; anything else is rejected and safe-logged
+  rather than interpolated.
   """
-  @spec get_media_url(non_neg_integer(), String.t()) :: Tesla.Env.result() | {:error, String.t()}
+  @spec get_media_url(non_neg_integer(), term()) :: Tesla.Env.result() | {:error, String.t()}
   def get_media_url(org_id, media_id) do
-    with {:ok, credentials} <- get_credentials(org_id) do
-      url = @swiftchat_url <> "/bots/" <> credentials.bot_id <> "/media/" <> media_id
+    with {:ok, safe_media_id} <- validate_media_id(media_id, org_id),
+         {:ok, credentials} <- get_credentials(org_id) do
+      url = @swiftchat_url <> "/bots/" <> credentials.bot_id <> "/media/" <> safe_media_id
       swiftchat_get(url, credentials.api_key)
     end
+  end
+
+  # F-079: opaque-identifier shape — alphanumeric, hyphen, underscore only,
+  # bounded length. SwiftChat's docs never pin down the exact media-id
+  # format (no UUID/other pattern confirmed live), so this is a defensive
+  # allowlist rather than a format we can cite chapter-and-verse for;
+  # anything containing `/`, `?`, `.`, whitespace, or other URL-structural
+  # characters (path traversal, query-string injection, a second host via
+  # `//evil.example.com`, etc.) is rejected before it can be interpolated
+  # into the authenticated GET above.
+  @media_id_pattern ~r/^[A-Za-z0-9_-]{1,128}$/
+
+  @spec validate_media_id(term(), non_neg_integer()) :: {:ok, String.t()} | {:error, String.t()}
+  defp validate_media_id(media_id, org_id)
+       when is_binary(media_id) do
+    if Regex.match?(@media_id_pattern, media_id) do
+      {:ok, media_id}
+    else
+      reject_media_id(media_id, org_id)
+    end
+  end
+
+  defp validate_media_id(media_id, org_id), do: reject_media_id(media_id, org_id)
+
+  @spec reject_media_id(term(), non_neg_integer()) :: {:error, String.t()}
+  defp reject_media_id(media_id, org_id) do
+    Glific.log_error(
+      "SwiftChat: rejected non-conforming media_id before authenticated media-URL fetch, " <>
+        "org #{org_id} — " <> Glific.SafeLog.safe_inspect(media_id)
+    )
+
+    {:error, "Invalid SwiftChat media id"}
   end
 
   @doc """
