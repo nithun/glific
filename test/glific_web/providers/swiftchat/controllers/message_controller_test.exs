@@ -7,6 +7,8 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
   """
   use GlificWeb.ConnCase
 
+  import Ecto.Query, warn: false
+
   alias Glific.{
     Contacts,
     Contacts.Contact,
@@ -613,6 +615,100 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
       assert %FlowContext{} = flow_context
       assert flow_context.contact_id == contact_id
       assert flow_context.node_uuid != nil
+    end
+
+    @flow_start_webhook %{
+      "from" => "+919917443997",
+      "type" => "text",
+      "timestamp" => 1_707_217_100,
+      "message_id" => "swiftchat-msg-flow-interactive-start",
+      "conversation_id" => "conv-flow-interactive",
+      "conversation_initiated_by" => "user",
+      "text" => %{"body" => "help"}
+    }
+
+    @flow_interactive_reply_webhook %{
+      "from" => "+919917443997",
+      "type" => "button_response",
+      "timestamp" => 1_707_217_101,
+      "message_id" => "swiftchat-msg-flow-interactive-reply",
+      "conversation_id" => "conv-flow-interactive",
+      "conversation_initiated_by" => "user",
+      "button_response" => %{"button_index" => 1, "body" => "1"}
+    }
+
+    test "F-080: an inbound SwiftChat interactive reply advances an already-ACTIVE flow",
+         %{conn: conn, organization_id: organization_id} do
+      # Same "help" keyword as the text-path test above starts the seeded
+      # "Help Workflow" flow, which lands on a `wait_for_response` node
+      # that routes on the next reply's body (`has_any_word` on "1"/"2"/
+      # "3" — `priv/data/flows/help.json`). Unlike the text-path test
+      # (which only proves a flow can *start*), this drives a SECOND,
+      # interactive-typed inbound message (`button_response`, T-09's
+      # normalizer) at that already-active flow and asserts the
+      # FlowContext moves past the wait node — the T-09 acceptance
+      # criterion `message_controller_test.exs:158-263`'s Message-only
+      # assertions never covered (F-080).
+      start_conn = post(conn, "/swiftchat", @flow_start_webhook)
+      assert start_conn.halted
+
+      {:ok, start_message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-flow-interactive-start",
+          organization_id: organization_id
+        })
+
+      contact_id = start_message.contact_id
+      state = ConsumerFlow.load_state(organization_id)
+
+      start_message =
+        Repo.preload(start_message, [:location, :media, :whatsapp_form_response, :contact])
+
+      ConsumerFlow.process_message({start_message, state}, start_message.body)
+
+      flow_context_before_reply = FlowContext.active_context(contact_id)
+      assert %FlowContext{} = flow_context_before_reply
+      assert flow_context_before_reply.node_uuid != nil
+
+      reply_conn = post(conn, "/swiftchat", @flow_interactive_reply_webhook)
+      assert reply_conn.halted
+
+      {:ok, reply_message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-flow-interactive-reply",
+          organization_id: organization_id
+        })
+
+      assert reply_message.interactive_content["button_index"] == 1
+
+      reply_message =
+        Repo.preload(reply_message, [:location, :media, :whatsapp_form_response, :contact])
+
+      ConsumerFlow.process_message({reply_message, state}, reply_message.body)
+
+      flow_context_after_reply = FlowContext.active_context(contact_id)
+
+      # The "1" branch of the seeded Help Workflow runs straight through
+      # to completion (no further wait_for_response node) — so a
+      # genuinely-advanced FlowContext ends up `nil` (completed) here,
+      # not parked at a second node the way a single-hop flow's
+      # node_uuid-diff assertion could check. Assert both halves of "the
+      # interactive reply drove the router, not just persisted a Message
+      # row": (1) the context is no longer active at the wait node it
+      # was parked at (the flow completed), and (2) the option-1
+      # branch's own outbound message was actually sent, proving the
+      # router matched the interactive reply's body ("1") against its
+      # `has_any_word` case rather than silently falling through.
+      refute flow_context_after_reply
+
+      assert Repo.exists?(
+               from(m in Message,
+                 where:
+                   m.contact_id == ^contact_id and
+                     m.flow == :outbound and
+                     m.body == "Message for option 1"
+               )
+             )
     end
   end
 end
