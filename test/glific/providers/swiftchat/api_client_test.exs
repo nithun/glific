@@ -231,6 +231,116 @@ defmodule Glific.Providers.Swiftchat.ApiClientTest do
     end
   end
 
+  describe "upload_media/3 and delete_media/2 (ADR-017 T21)" do
+    test "posts a multipart body with type + file fields and returns the provider media id",
+         attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn
+        %{method: :post, url: url, headers: headers, body: %Tesla.Multipart{} = multipart} ->
+          assert url == "https://v1-api.swiftchat.ai/api/bots/test_bot_id/media"
+          assert {"authorization", "Bearer test_swiftchat_api_key"} in headers
+
+          field_names =
+            multipart.parts
+            |> Enum.map(fn part -> Keyword.get(part.dispositions, :name) end)
+
+          assert "type" in field_names
+          assert "file" in field_names
+
+          %Tesla.Env{
+            status: 201,
+            body: Jason.encode!(%{"id" => "provider-media-id-abc123"})
+          }
+      end)
+
+      assert {:ok, "provider-media-id-abc123"} =
+               ApiClient.upload_media(attrs.organization_id, "fake image bytes", "image/png")
+    end
+
+    test "rejects an upload over the 64 MB cap before making any network call", attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn _env ->
+        flunk("SwiftChat should not have been called for an oversize upload")
+      end)
+
+      oversize_content = :binary.copy(<<0>>, 64 * 1024 * 1024 + 1)
+
+      assert {:error, error_msg} =
+               ApiClient.upload_media(attrs.organization_id, oversize_content, "image/png")
+
+      assert error_msg =~ "exceeds the 64 MB SwiftChat limit"
+    end
+
+    test "returns an error when the upload response is a non-2xx status", attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn %{method: :post} ->
+        %Tesla.Env{status: 400, body: Jason.encode!(%{"code" => 1, "message" => "bad request"})}
+      end)
+
+      assert {:error, error_msg} =
+               ApiClient.upload_media(attrs.organization_id, "fake image bytes", "image/png")
+
+      assert error_msg =~ "SwiftChat media upload failed"
+    end
+
+    test "returns an error when the success response body has no id", attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn %{method: :post} ->
+        %Tesla.Env{status: 201, body: Jason.encode!(%{"unexpected" => "shape"})}
+      end)
+
+      assert {:error, error_msg} =
+               ApiClient.upload_media(attrs.organization_id, "fake image bytes", "image/png")
+
+      assert error_msg =~ "unexpected response"
+    end
+
+    test "returns a credential error when no swiftchat credential is active for upload", attrs do
+      assert {:error, error_msg} =
+               ApiClient.upload_media(attrs.organization_id, "fake image bytes", "image/png")
+
+      assert error_msg =~ "API Key and Bot ID"
+    end
+
+    test "DELETEs the bot-scoped media endpoint with a Bearer token header", attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn
+        %{method: :delete, url: url, headers: headers} ->
+          assert url ==
+                   "https://v1-api.swiftchat.ai/api/bots/test_bot_id/media/provider-media-id-abc123"
+
+          assert {"authorization", "Bearer test_swiftchat_api_key"} in headers
+
+          %Tesla.Env{status: 200, body: ""}
+      end)
+
+      assert {:ok, %Tesla.Env{status: 200}} =
+               ApiClient.delete_media(attrs.organization_id, "provider-media-id-abc123")
+    end
+
+    test "F-079: rejects a non-conforming media_id before ever calling the BSP delete endpoint",
+         attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn _env ->
+        flunk("BSP should not have been called with a non-conforming media_id")
+      end)
+
+      assert {:error, error_msg} =
+               ApiClient.delete_media(
+                 attrs.organization_id,
+                 "../../merchants/other-merchant/templates"
+               )
+
+      assert error_msg =~ "Invalid SwiftChat media id"
+    end
+  end
+
   describe "get_bot_configuration/2 (PRD-003 F-2: live credential-verification ping)" do
     test "GETs the bot-scoped configuration endpoint with a Bearer token header" do
       Tesla.Mock.mock(fn

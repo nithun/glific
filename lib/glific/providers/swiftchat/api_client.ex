@@ -8,6 +8,7 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
   `docs/adrs/ADR-002-swiftchat-fourth-bsp.md`.
   """
   alias Glific.Partners
+  alias Tesla.Multipart
   use Gettext, backend: GlificWeb.Gettext
 
   # Confirmed from the official "SwiftChat Platform" Postman collection
@@ -238,6 +239,146 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
           "/templates/" <>
           template_name
 
+      delete(url, headers: [{"authorization", "Bearer " <> credentials.api_key}])
+    end
+  end
+
+  # 64 MB, confirmed max media size (`docs/prds/PRD-001-spike-notes.md` §4,
+  # ADR-006). `Swiftchat.Message.check_media_size/2` enforces this for the
+  # already-implemented URL-pass-through send path via a HEAD-equivalent
+  # Content-Length check (there is no local copy of the bytes to measure
+  # there); here we already hold the full content in memory (T22's resolver
+  # downloads it once to compute the content-sha256 key), so the cap is
+  # enforced directly against `byte_size/1` instead of re-issuing a network
+  # request — same limit, same ADR-006 "fail fast at enqueue" contract,
+  # cheaper check for this call shape.
+  @max_upload_bytes 64 * 1024 * 1024
+
+  @doc """
+  Uploads media to SwiftChat's Media API (ADR-017 T21).
+
+  Path confirmed from the official Postman collection (`Media > Upload-Media`):
+  `POST {URL}/bots/{Bot-ID}/media` with Bearer `{API-Key}` auth, multipart
+  body: field `type` (the MIME type string) + field `file` (the raw bytes).
+  Success is `201` with `{"id": "<21-char url-safe token>"}` — confirmed
+  live via the D3 probe (`docs/adrs/ADR-017-swiftchat-media-asset-registry.md`
+  Audit table, 2026-08-13): ids are unique per upload with **no server-side
+  dedup** (re-uploading identical bytes returns a DIFFERENT id), which is
+  exactly why the registry keys on content hash rather than trusting the
+  provider to dedup for us.
+
+  The returned id is provider-internal state (ADR-006/ADR-017) — this
+  function is the only place in Glific that produces one; callers outside
+  `Glific.Providers.Swiftchat.*` must never see it (the registry, not the
+  raw id, is what crosses that boundary).
+  """
+  @spec upload_media(non_neg_integer(), binary(), String.t()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def upload_media(org_id, file_content, content_type)
+      when is_binary(file_content) and is_binary(content_type) do
+    if byte_size(file_content) > @max_upload_bytes do
+      {:error,
+       "Media size exceeds the 64 MB SwiftChat limit (#{byte_size(file_content)} bytes) — upload rejected"}
+    else
+      do_upload_media(org_id, file_content, content_type)
+    end
+  end
+
+  @spec do_upload_media(non_neg_integer(), binary(), String.t()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  defp do_upload_media(org_id, file_content, content_type) do
+    with {:ok, credentials} <- get_credentials(org_id) do
+      url = @swiftchat_url <> "/bots/" <> credentials.bot_id <> "/media"
+
+      multipart =
+        Multipart.new()
+        |> Multipart.add_field("type", content_type)
+        |> Multipart.add_file_content(file_content, "upload",
+          name: "file",
+          headers: [{"content-type", content_type}]
+        )
+
+      url
+      |> post(multipart, headers: [{"authorization", "Bearer " <> credentials.api_key}])
+      |> handle_upload_response(org_id)
+    end
+  end
+
+  @spec handle_upload_response(Tesla.Env.result(), non_neg_integer()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  defp handle_upload_response({:ok, %Tesla.Env{status: status, body: body}}, org_id)
+       when status in 200..299 do
+    case decode_media_id(body) do
+      {:ok, id} ->
+        {:ok, id}
+
+      :error ->
+        Glific.log_error(
+          "SwiftChat: Upload-Media returned #{status} with an unexpected body shape, org #{org_id}"
+        )
+
+        {:error, "SwiftChat media upload returned an unexpected response"}
+    end
+  end
+
+  defp handle_upload_response({:ok, env}, org_id) do
+    Glific.log_error(
+      "SwiftChat: Upload-Media failed for org #{org_id} — " <> Glific.SafeLog.safe_inspect(env)
+    )
+
+    {:error, "SwiftChat media upload failed"}
+  end
+
+  defp handle_upload_response({:error, reason}, org_id) do
+    Glific.log_error(
+      "SwiftChat: Upload-Media request error for org #{org_id} — " <>
+        Glific.SafeLog.safe_inspect(reason)
+    )
+
+    {:error, "SwiftChat media upload failed"}
+  end
+
+  # Response bodies come back as raw JSON strings, not pre-decoded maps —
+  # `Tesla.Middleware.JSON` only decodes when the response carries a
+  # `content-type: application/json` header, which `Tesla.Mock`'s
+  # `%Tesla.Env{}` fixtures (and, per the T-08 test above, live SwiftChat
+  # responses observed so far) don't reliably set. Handles both shapes
+  # defensively rather than assuming one.
+  @spec decode_media_id(term()) :: {:ok, String.t()} | :error
+  defp decode_media_id(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> decode_media_id(decoded)
+      {:error, _reason} -> :error
+    end
+  end
+
+  defp decode_media_id(%{"id" => id}) when is_binary(id) and id != "", do: {:ok, id}
+  defp decode_media_id(_body), do: :error
+
+  @doc """
+  Deletes an uploaded media asset from SwiftChat (ADR-017 T21).
+
+  Path confirmed: `DELETE {URL}/bots/{Bot-ID}/media/{Media-ID}` with Bearer
+  `{API-Key}` auth. Confirmed live via the D3 probe (ADR-017 Audit table,
+  2026-08-13): the call returns `200`, but deletion is **soft/lazy** — the
+  id still resolves immediately after the delete call. Treat this as
+  best-effort cleanup, not a synchronous guarantee the id stops working
+  (ADR-017's registry-invalidation path does not depend on this call
+  succeeding or on the delete actually taking effect).
+
+  `media_id` is validated with the SAME F-079 opaque-identifier allowlist
+  `get_media_url/2` uses (`validate_media_id/2`) before it is interpolated
+  into the URL — this id is expected to originate from our own registry
+  (T20/T22), not an unsigned webhook, but reusing one shape contract for
+  every place a SwiftChat media id reaches a URL costs nothing and closes
+  off a second path to the same F-079 vector class if a future caller ever
+  passes an externally-sourced id here.
+  """
+  @spec delete_media(non_neg_integer(), term()) :: Tesla.Env.result() | {:error, String.t()}
+  def delete_media(org_id, media_id) do
+    with {:ok, safe_media_id} <- validate_media_id(media_id, org_id),
+         {:ok, credentials} <- get_credentials(org_id) do
+      url = @swiftchat_url <> "/bots/" <> credentials.bot_id <> "/media/" <> safe_media_id
       delete(url, headers: [{"authorization", "Bearer " <> credentials.api_key}])
     end
   end
