@@ -65,14 +65,24 @@ defmodule Glific.Templates.InteractiveTemplate do
   """
   @spec changeset(InteractiveTemplate.t(), map()) :: Ecto.Changeset.t()
   def changeset(interactive, attrs) do
+    # F-086(a): the two `unique_constraint/2` calls below were previously
+    # crossed (each field list paired with the OTHER call's DB index
+    # name) and one field list had an `:organisation_id` typo (not a
+    # real field on this schema). Field lists here must pair with the
+    # actual composite unique index they represent — verified against
+    # `priv/repo/structure.sql`, which defines exactly these two indexes:
+    # `interactive_templates_label_type_organization_id_index` on
+    # `(label, type, organization_id)` and
+    # `interactive_templates_label_language_id_organization_id_index` on
+    # `(label, language_id, organization_id)`.
     interactive
     |> cast(attrs, @required_fields ++ @optional_fields)
     |> validate_required(@required_fields)
     |> unique_constraint([:label, :type, :organization_id],
-      name: :interactive_templates_label_language_id_organization_id_index
-    )
-    |> unique_constraint([:label, :language_id, :organisation_id],
       name: :interactive_templates_label_type_organization_id_index
+    )
+    |> unique_constraint([:label, :language_id, :organization_id],
+      name: :interactive_templates_label_language_id_organization_id_index
     )
     |> foreign_key_constraint(:tag_id)
     |> foreign_key_constraint(:language_id)

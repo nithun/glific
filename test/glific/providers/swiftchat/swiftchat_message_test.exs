@@ -364,6 +364,49 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
       assert error_msg =~ "location_request_message"
       refute_enqueued(worker: Worker, prefix: attrs.global_schema)
     end
+
+    test "F-086(b): any other unmapped interactive_content type also returns a proper {:error, reason} tuple, not a bare log-call result",
+         attrs do
+      sender = Fixtures.contact_fixture(attrs)
+      receiver = Fixtures.contact_fixture(attrs)
+
+      message =
+        Fixtures.message_fixture(%{
+          organization_id: attrs.organization_id,
+          sender_id: sender.id,
+          receiver_id: receiver.id,
+          type: :quick_reply,
+          interactive_content: %{"type" => "a_future_swiftchat_type_not_yet_mapped"},
+          flow: :outbound
+        })
+
+      result = Glific.Providers.Swiftchat.Message.send_interactive(message)
+
+      assert {:error, error_msg} = result
+      assert is_binary(error_msg)
+      assert error_msg =~ "a_future_swiftchat_type_not_yet_mapped"
+      refute_enqueued(worker: Worker, prefix: attrs.global_schema)
+    end
+
+    test "F-086(b): a nil interactive_content type is also rejected cleanly, not with a crash",
+         attrs do
+      sender = Fixtures.contact_fixture(attrs)
+      receiver = Fixtures.contact_fixture(attrs)
+
+      message =
+        Fixtures.message_fixture(%{
+          organization_id: attrs.organization_id,
+          sender_id: sender.id,
+          receiver_id: receiver.id,
+          type: :quick_reply,
+          interactive_content: %{},
+          flow: :outbound
+        })
+
+      assert {:error, error_msg} = Glific.Providers.Swiftchat.Message.send_interactive(message)
+      assert error_msg =~ "nil"
+      refute_enqueued(worker: Worker, prefix: attrs.global_schema)
+    end
   end
 
   describe "media sends (T-08 scope): send_image/2, send_video/2, send_document/2, send_audio/2" do

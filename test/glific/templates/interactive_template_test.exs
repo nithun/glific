@@ -134,6 +134,45 @@ defmodule Glific.Templates.InteractiveTemplateTest do
              ]
     end
 
+    test "F-086(a): changeset registers exactly the two real composite unique indexes, correctly paired",
+         %{organization_id: org_id} do
+      # Regression lock-in: the two `unique_constraint/2` calls in
+      # `changeset/2` previously had their field lists and `name:`
+      # options crossed (and one field list carried an `:organisation_id`
+      # typo — not a real field on this schema). Both real DB indexes
+      # (confirmed in `priv/repo/structure.sql`) must be registered on
+      # the changeset, each keyed to a valid schema field.
+      attrs = %{
+        label: "Some label",
+        type: :quick_reply,
+        interactive_content: %{},
+        organization_id: org_id,
+        language_id: language_fixture().id
+      }
+
+      changeset = InteractiveTemplate.changeset(%InteractiveTemplate{}, attrs)
+
+      constraint_names =
+        changeset.constraints
+        |> Enum.filter(&(&1.type == :unique))
+        |> Enum.map(& &1.constraint)
+        |> Enum.sort()
+
+      assert constraint_names == [
+               "interactive_templates_label_language_id_organization_id_index",
+               "interactive_templates_label_type_organization_id_index"
+             ]
+
+      # every registered unique constraint must key off a real schema
+      # field — the pre-fix code registered one against `:organisation_id`,
+      # which does not exist on this schema.
+      schema_fields = InteractiveTemplate.__schema__(:fields)
+
+      for constraint <- changeset.constraints, constraint.type == :unique do
+        assert constraint.field in schema_fields
+      end
+    end
+
     test "invalid interactive_template: organisation must exist" do
       attrs = %{
         label: "Some label",

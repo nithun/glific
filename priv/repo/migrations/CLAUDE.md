@@ -2,8 +2,14 @@
 
 ~85 timestamp-named migrations. Migrations are **append-only and immutable once merged** — never
 edit a migration that has shipped; write a new one to change course. The dev/test schema is also
-captured in `priv/repo/structure.sql` (loaded via `ecto.load`), so a new migration must keep that
-in sync (running `mix ecto.migrate` regenerates it).
+captured in `priv/repo/structure.sql` — **but that file is a frozen snapshot (last
+regenerated 2023-07-10), not kept in sync automatically.** `mix ecto.migrate` does
+**NOT** regenerate it (F-086(c) doc correction — verified against every alias in
+`mix.exs` that touches Ecto: `ecto.setup`/`ecto.reset`/`test`/`test_full` all run
+`ecto.load --skip-if-loaded` then `ecto.migrate`, and none of them call `ecto.dump`).
+Do **not** hand-edit `structure.sql` to "fix" this drift — if it ever needs
+regenerating, that is a deliberate `mix ecto.dump` run against a fully-migrated DB,
+done once, reviewed as its own change.
 
 > Read this before adding a migration. Pairs with the schema conventions in `lib/glific/CLAUDE.md`.
 
@@ -66,10 +72,13 @@ Production tables (messages, contacts, flow_contexts, etc.) are large. On those:
 
 ## After writing a migration
 
-1. `mix ecto.migrate` (updates `structure.sql`).
+1. `mix ecto.migrate` (applies the migration to your local DB — does **NOT** update
+   `structure.sql`; see the frozen-snapshot note above).
 2. Add/adjust the Ecto schema field + `@type t()` + changeset (`lib/glific/CLAUDE.md`).
 3. Seed any reference rows in `priv/repo/seeds_dev.exs` if dev/tests rely on them.
-4. Run the relevant tests; `mix test` recreates the test DB from the migrations/structure.
+4. Run the relevant tests; `mix test` loads `structure.sql` then runs `ecto.migrate` on
+   top of it (`mix.exs` aliases), so a fresh test DB reflects both the frozen snapshot
+   AND every migration since — including yours.
 
-Never edit `structure.sql` by hand and never delete/renumber a merged migration — both desync the
+Never hand-edit `structure.sql` and never delete/renumber a merged migration — both desync the
 schema across environments.

@@ -345,9 +345,19 @@ defmodule Glific.Providers.Swiftchat.Message do
         |> send_message(message, attrs)
 
       other_type ->
-        Glific.log_error(
+        # F-086(b): construct the `{:error, reason}` tuple explicitly
+        # rather than returning `Glific.log_error/2`'s result implicitly —
+        # `log_error/2` does today return `{:error, error}` (verified:
+        # `lib/glific.ex:362-373`, and already locked in by the
+        # "location_request_message ... is rejected, not guessed" test
+        # below), but this call site should not depend on a caller
+        # reading that implementation detail to know it's error-safe for
+        # `with` chains.
+        reason =
           "SwiftChat: unsupported interactive message variant #{other_type || "nil"} for message id #{message.id} — no SwiftChat equivalent exists (see send_interactive/2 moduledoc), send skipped"
-        )
+
+        Glific.log_error(reason)
+        {:error, reason}
     end
   end
 
