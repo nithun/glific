@@ -11,7 +11,8 @@ defmodule Glific.Templates.InteractiveTemplate do
 
   alias Glific.{
     Enums.InteractiveMessageType,
-    Settings.Language
+    Settings.Language,
+    Templates.InteractiveMessageDescriptor
   }
 
   @required_fields [
@@ -78,6 +79,7 @@ defmodule Glific.Templates.InteractiveTemplate do
     interactive
     |> cast(attrs, @required_fields ++ @optional_fields)
     |> validate_required(@required_fields)
+    |> validate_interactive_content()
     |> unique_constraint([:label, :type, :organization_id],
       name: :interactive_templates_label_type_organization_id_index
     )
@@ -87,5 +89,23 @@ defmodule Glific.Templates.InteractiveTemplate do
     |> foreign_key_constraint(:tag_id)
     |> foreign_key_constraint(:language_id)
     |> foreign_key_constraint(:organization_id)
+  end
+
+  # ADR-016 rule 1: `interactive_content` is a Glific-owned canonical shape,
+  # validated at write time — including the cross-check that
+  # `interactive_content["type"]` agrees with the `type` column (closes the
+  # divergence at `flows/contact_action.ex:109`, where the JSON string used
+  # to silently win at send time with no changeset-level guard at all).
+  # See `Glific.Templates.InteractiveMessageDescriptor` for the schema
+  # declarations and how permissive/strict this deliberately is.
+  @spec validate_interactive_content(Ecto.Changeset.t()) :: Ecto.Changeset.t()
+  defp validate_interactive_content(changeset) do
+    type = get_field(changeset, :type)
+    content = get_field(changeset, :interactive_content)
+
+    case InteractiveMessageDescriptor.validate(type, content) do
+      :ok -> changeset
+      {:error, message} -> add_error(changeset, :interactive_content, message)
+    end
   end
 end

@@ -173,6 +173,84 @@ defmodule Glific.Templates.InteractiveTemplateTest do
       end
     end
 
+    test "ADR-016 rule 1: interactive_content[\"type\"] must match the type column", %{
+      organization_id: org_id
+    } do
+      attrs = %{
+        label: "Mismatched type label",
+        type: :quick_reply,
+        interactive_content: %{
+          "type" => "list",
+          "title" => "Interactive list",
+          "body" => "some body",
+          "globalButtons" => [%{"type" => "text", "title" => "button text"}],
+          "items" => []
+        },
+        organization_id: org_id,
+        language_id: language_fixture().id
+      }
+
+      assert {:error, changeset} =
+               InteractiveTemplate.changeset(%InteractiveTemplate{}, attrs)
+               |> Repo.insert()
+
+      assert %{interactive_content: [message]} = errors_on(changeset)
+      assert message =~ "does not match"
+    end
+
+    test "ADR-016 rule 1: the 3 existing types' real shapes validate with zero behavior change",
+         %{organization_id: org_id} do
+      quick_reply_attrs = %{
+        label: "Real quick_reply shape",
+        type: :quick_reply,
+        interactive_content: %{
+          "type" => "quick_reply",
+          "content" => %{"type" => "text", "text" => "How excited are you for Glific?"},
+          "options" => [%{"type" => "text", "title" => "Excited"}]
+        },
+        organization_id: org_id,
+        language_id: language_fixture().id
+      }
+
+      assert {:ok, _} =
+               InteractiveTemplate.changeset(%InteractiveTemplate{}, quick_reply_attrs)
+               |> Repo.insert()
+
+      list_attrs = %{
+        label: "Real list shape",
+        type: :list,
+        interactive_content: %{
+          "type" => "list",
+          "title" => "Interactive list",
+          "body" => "Glific",
+          "globalButtons" => [%{"type" => "text", "title" => "button text"}],
+          "items" => [%{"title" => "Item", "subtitle" => "Sub", "options" => []}]
+        },
+        organization_id: org_id,
+        language_id: language_fixture().id
+      }
+
+      assert {:ok, _} =
+               InteractiveTemplate.changeset(%InteractiveTemplate{}, list_attrs)
+               |> Repo.insert()
+
+      location_attrs = %{
+        label: "Real location shape",
+        type: :location_request_message,
+        interactive_content: %{
+          "type" => "location_request_message",
+          "body" => %{"type" => "text", "text" => "please share your location"},
+          "action" => %{"name" => "send_location"}
+        },
+        organization_id: org_id,
+        language_id: language_fixture().id
+      }
+
+      assert {:ok, _} =
+               InteractiveTemplate.changeset(%InteractiveTemplate{}, location_attrs)
+               |> Repo.insert()
+    end
+
     test "invalid interactive_template: organisation must exist" do
       attrs = %{
         label: "Some label",
