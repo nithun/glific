@@ -716,6 +716,24 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
       assert %{url: "unresolved://media-id-4", source_url: "unresolved://media-id-4"} =
                Glific.Providers.Swiftchat.Message.receive_media(payload)
     end
+
+    test "F-079 follow-up: a non-binary media id (malformed webhook) still falls back to a sentinel URL, without raising" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "image",
+        "message_id" => "swiftchat-msg-image-non-binary-id",
+        "image" => %{
+          "id" => %{"unexpected" => "shape"},
+          "body" => "a caption",
+          "content_type" => "image/png"
+        }
+      }
+
+      assert %{
+               url: "unresolved://" <> _rest,
+               source_url: "unresolved://" <> _rest2
+             } = Glific.Providers.Swiftchat.Message.receive_media(payload)
+    end
   end
 
   describe "receive_text/1 (T-05 scope)" do

@@ -474,7 +474,14 @@ defmodule Glific.Providers.Swiftchat.Message do
             "SwiftChat inbound media URL could not be resolved for message_id #{params["message_id"]}, type #{type} — storing message with a sentinel media URL"
           )
 
-          "unresolved://" <> to_string(media_payload["id"])
+          # F-079 follow-up: `media_payload["id"]` is whatever shape the
+          # unsigned inbound webhook sent (a malformed webhook can put a
+          # map/list there, not just a non-conforming string) — plain
+          # `to_string/1` raises `Protocol.UndefinedError` for any term
+          # without a `String.Chars` implementation (e.g. a map), which
+          # would crash this normalizer instead of falling through to the
+          # sentinel URL. `safe_media_id_string/1` stringifies any shape.
+          "unresolved://" <> safe_media_id_string(media_payload["id"])
       end
 
     %{
@@ -489,6 +496,16 @@ defmodule Glific.Providers.Swiftchat.Message do
       }
     }
   end
+
+  # F-079 follow-up: `to_string/1` (via `String.Chars`) has no
+  # implementation for maps/lists/tuples and raises — used only to build
+  # the `unresolved://<media-id>` sentinel from a value that may be
+  # anything the unsigned inbound webhook put there.
+  @spec safe_media_id_string(term()) :: String.t()
+  defp safe_media_id_string(media_id) when is_binary(media_id), do: media_id
+  defp safe_media_id_string(media_id) when is_atom(media_id), do: to_string(media_id)
+  defp safe_media_id_string(media_id) when is_integer(media_id), do: Integer.to_string(media_id)
+  defp safe_media_id_string(media_id), do: Glific.SafeLog.safe_inspect(media_id)
 
   @doc """
   F-082(c): unreachable by design, not merely unimplemented. SwiftChat's

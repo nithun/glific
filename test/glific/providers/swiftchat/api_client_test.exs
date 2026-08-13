@@ -215,6 +215,20 @@ defmodule Glific.Providers.Swiftchat.ApiClientTest do
 
       assert error_msg =~ "Invalid SwiftChat media id"
     end
+
+    test "F-079 follow-up: rejects a media_id with a trailing newline (PCRE `$` matches before it, `\\z` does not)",
+         attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn _env ->
+        flunk("BSP should not have been called with a media_id carrying a trailing newline")
+      end)
+
+      assert {:error, error_msg} =
+               ApiClient.get_media_url(attrs.organization_id, "abc123\n")
+
+      assert error_msg =~ "Invalid SwiftChat media id"
+    end
   end
 
   describe "get_bot_configuration/2 (PRD-003 F-2: live credential-verification ping)" do

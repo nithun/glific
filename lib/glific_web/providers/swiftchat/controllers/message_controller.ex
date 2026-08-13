@@ -26,8 +26,6 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageController do
 
   use GlificWeb, :controller
 
-  require Logger
-
   alias Glific.{
     Communications,
     Contacts,
@@ -147,8 +145,20 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageController do
         decoded["url"]
 
       error ->
-        Logger.error(
-          "SwiftChat: media URL resolution failed for media_id #{media_id}, org #{organization_id} — #{Glific.SafeLog.safe_inspect(error)}"
+        # F-079 follow-up: media_id originates from the unsigned inbound
+        # webhook body and may be any JSON shape (map/list/etc, not just a
+        # non-conforming binary) — string-interpolating a non-binary term
+        # directly (`#{media_id}`) raises `Protocol.UndefinedError` on this
+        # diagnostic line itself, crashing the controller and dropping the
+        # inbound message instead of falling through to the
+        # `unresolved://` sentinel. `safe_inspect/1` is loggable for any
+        # term shape. Uses `Glific.log_error/2` (not a bare `Logger.error`)
+        # per `lib/glific/CLAUDE.md`'s logging wrapper convention — it
+        # writes to Logger and reports to AppSignal in one call.
+        Glific.log_error(
+          "SwiftChat: media URL resolution failed for media_id " <>
+            "#{Glific.SafeLog.safe_inspect(media_id)}, org #{organization_id} — " <>
+            "#{Glific.SafeLog.safe_inspect(error)}"
         )
 
         nil

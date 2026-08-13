@@ -135,7 +135,11 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
   # characters (path traversal, query-string injection, a second host via
   # `//evil.example.com`, etc.) is rejected before it can be interpolated
   # into the authenticated GET above.
-  @media_id_pattern ~r/^[A-Za-z0-9_-]{1,128}$/
+  # `\A`/`\z` (not `^`/`$`) deliberately: in PCRE (and Elixir's `Regex`,
+  # which wraps PCRE), `$` matches immediately before a trailing newline,
+  # so `^...$` would let a media_id like `"abc123\n"` through — `\A`/`\z`
+  # anchor to the true start/end of the string with no such exception.
+  @media_id_pattern ~r/\A[A-Za-z0-9_-]{1,128}\z/
 
   @spec validate_media_id(term(), non_neg_integer()) :: {:ok, String.t()} | {:error, String.t()}
   defp validate_media_id(media_id, org_id)

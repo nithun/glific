@@ -557,6 +557,43 @@ defmodule GlificWeb.Providers.Swiftchat.Controllers.MessageControllerTest do
       assert message.media.url =~ "unresolved://"
       assert message.media.source_url =~ "unresolved://"
     end
+
+    test "F-079 follow-up: a non-binary media_id (malformed webhook) does not crash the controller, message still stored with a sentinel URL",
+         %{conn: conn, organization_id: organization_id} do
+      :ok = activate_swiftchat(organization_id)
+
+      Tesla.Mock.mock(fn
+        %{method: :get} ->
+          flunk("BSP should not have been called with a non-binary media_id")
+      end)
+
+      # A malformed/unexpected webhook body where the media id itself is a
+      # map (not a string) — `ApiClient.get_media_url/2` already rejects
+      # this shape (F-079's `is_binary` guard), but the controller's own
+      # diagnostic-logging branch used to interpolate the raw `media_id`
+      # into a Logger message (`#{media_id}`), which raises
+      # `Protocol.UndefinedError` for a non-`String.Chars` term and crashed
+      # the controller before it could fall through to the
+      # `unresolved://` sentinel.
+      malformed_webhook =
+        @image_webhook
+        |> Map.put("message_id", "swiftchat-msg-image-non-binary-id")
+        |> put_in(["image", "id"], %{"unexpected" => "shape"})
+
+      conn = post(conn, "/swiftchat", malformed_webhook)
+      assert conn.halted
+
+      {:ok, message} =
+        Repo.fetch_by(Message, %{
+          bsp_message_id: "swiftchat-msg-image-non-binary-id",
+          organization_id: organization_id
+        })
+
+      message = Repo.preload(message, :media)
+      assert %MessageMedia{} = message.media
+      assert message.media.url =~ "unresolved://"
+      assert message.media.source_url =~ "unresolved://"
+    end
   end
 
   describe "flow advancement (T-05/T-09 AC: inbound reply advances a flow)" do
