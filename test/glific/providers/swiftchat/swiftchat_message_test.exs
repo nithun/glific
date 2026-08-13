@@ -536,7 +536,11 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
     end
 
     test "media size check tolerates an unreachable size-check URL and still sends", attrs do
-      message = media_message_fixture(attrs, :image, "https://example.com/photo.png")
+      # Distinct URL from every other test in this describe block (F-082(b)
+      # caches the size-check result per source_url) — reusing an already
+      # cached-`:ok` URL here would let this test pass without ever
+      # exercising the timeout branch it's named for.
+      message = media_message_fixture(attrs, :image, "https://example.com/photo-unreachable.png")
 
       Tesla.Mock.mock(fn
         %{method: :post} ->
@@ -547,6 +551,127 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
       end)
 
       assert {:ok, _job} = Glific.Providers.Swiftchat.Message.send_image(message)
+    end
+
+    test "F-082(b): the size-check result is cached per source_url — a second send to the same URL issues no new GET",
+         attrs do
+      source_url = "https://example.com/cached-size-check.png"
+
+      {:ok, get_call_count} = Agent.start_link(fn -> 0 end)
+
+      Tesla.Mock.mock(fn
+        %{method: :post} ->
+          %Tesla.Env{status: 201, body: Jason.encode!(%{"id" => Ecto.UUID.generate()})}
+
+        %{method: :get} ->
+          Agent.update(get_call_count, &(&1 + 1))
+          %Tesla.Env{status: 200, headers: [{"content-length", "1024"}], body: ""}
+      end)
+
+      first_message = media_message_fixture(attrs, :image, source_url)
+      assert {:ok, _job} = Glific.Providers.Swiftchat.Message.send_image(first_message)
+      assert Agent.get(get_call_count, & &1) == 1
+
+      second_message = media_message_fixture(attrs, :image, source_url)
+      assert {:ok, _job} = Glific.Providers.Swiftchat.Message.send_image(second_message)
+
+      # a second send against the SAME source_url (mirroring a broadcast
+      # to a second recipient) must not issue a second GET.
+      assert Agent.get(get_call_count, & &1) == 1
+    end
+
+    test "F-082(b): an oversize result is also cached — a second send to the same URL is rejected without a new GET",
+         attrs do
+      source_url = "https://example.com/cached-oversize.png"
+
+      {:ok, get_call_count} = Agent.start_link(fn -> 0 end)
+
+      Tesla.Mock.mock(fn
+        %{method: :post} ->
+          %Tesla.Env{status: 201, body: Jason.encode!(%{"id" => Ecto.UUID.generate()})}
+
+        %{method: :get} ->
+          Agent.update(get_call_count, &(&1 + 1))
+          %Tesla.Env{status: 200, headers: [{"content-length", "#{70 * 1024 * 1024}"}], body: ""}
+      end)
+
+      first_message = media_message_fixture(attrs, :image, source_url)
+      assert {:error, error_msg} = Glific.Providers.Swiftchat.Message.send_image(first_message)
+      assert error_msg =~ "64 MB"
+      assert Agent.get(get_call_count, & &1) == 1
+
+      second_message = media_message_fixture(attrs, :image, source_url)
+      assert {:error, ^error_msg} = Glific.Providers.Swiftchat.Message.send_image(second_message)
+      assert Agent.get(get_call_count, & &1) == 1
+    end
+  end
+
+  describe "receive_media/1 (F-082(d): direct unit coverage — previously controller-only)" do
+    test "normalizes an image payload with a resolved_url into the standard inbound-media map" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "image",
+        "message_id" => "swiftchat-msg-image-1",
+        "resolved_url" => "https://s3.example.com/presigned-image?X-Amz-Expires=900",
+        "image" => %{"id" => "media-id-1", "body" => "a caption", "content_type" => "image/png"}
+      }
+
+      assert %{
+               bsp_message_id: "swiftchat-msg-image-1",
+               caption: "a caption",
+               url: "https://s3.example.com/presigned-image?X-Amz-Expires=900",
+               source_url: "https://s3.example.com/presigned-image?X-Amz-Expires=900",
+               content_type: "image/png",
+               sender: %{phone: "+919917443994", name: "+919917443994"}
+             } = Glific.Providers.Swiftchat.Message.receive_media(payload)
+    end
+
+    test "video falls back to 'title' for the caption (no 'body' key in the confirmed shape)" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "video",
+        "message_id" => "swiftchat-msg-video-1",
+        "resolved_url" => "https://s3.example.com/presigned-video",
+        "video" => %{"id" => "media-id-3", "title" => "a clip", "content_type" => "video/mp4"}
+      }
+
+      assert %{caption: "a clip", url: "https://s3.example.com/presigned-video"} =
+               Glific.Providers.Swiftchat.Message.receive_media(payload)
+    end
+
+    test "a missing resolved_url falls back to the unresolved:// sentinel, keyed by media id" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "document",
+        "message_id" => "swiftchat-msg-document-1",
+        "document" => %{
+          "id" => "media-id-2",
+          "name" => "report.pdf",
+          "body" => "a report",
+          "content_type" => "application/pdf"
+        }
+      }
+
+      assert %{
+               bsp_message_id: "swiftchat-msg-document-1",
+               caption: "a report",
+               url: "unresolved://media-id-2",
+               source_url: "unresolved://media-id-2",
+               content_type: "application/pdf"
+             } = Glific.Providers.Swiftchat.Message.receive_media(payload)
+    end
+
+    test "a blank resolved_url also falls back to the sentinel, not an empty URL" do
+      payload = %{
+        "from" => "+919917443994",
+        "type" => "audio",
+        "message_id" => "swiftchat-msg-audio-1",
+        "resolved_url" => "",
+        "audio" => %{"id" => "media-id-4", "title" => "a note", "content_type" => "audio/mpeg"}
+      }
+
+      assert %{url: "unresolved://media-id-4", source_url: "unresolved://media-id-4"} =
+               Glific.Providers.Swiftchat.Message.receive_media(payload)
     end
   end
 

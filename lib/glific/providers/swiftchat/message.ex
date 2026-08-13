@@ -16,6 +16,7 @@ defmodule Glific.Providers.Swiftchat.Message do
   @behaviour Glific.Providers.MessageBehaviour
 
   alias Glific.{
+    Caches,
     Communications,
     Messages.Message,
     Repo
@@ -479,7 +480,18 @@ defmodule Glific.Providers.Swiftchat.Message do
     }
   end
 
-  @doc false
+  @doc """
+  F-082(c): unreachable by design, not merely unimplemented. SwiftChat's
+  documented inbound webhook `type` values (`docs/prds/PRD-001-spike-notes.md`
+  §3) never include a location/location-request reply, and
+  `GlificWeb.Providers.Swiftchat.Plugs.Shunt`'s dispatch clauses only ever
+  route `text`/`interactive`/`media` types to a handler — everything else
+  (including any future `location`-shaped `type`) falls to the catch-all
+  `unknown` action, which never calls this module at all. This callback
+  exists purely to satisfy `MessageBehaviour`; a shunt/router edit that
+  routes real traffic here would hit this raise, so keep this comment in
+  sync if that dispatch ever changes.
+  """
   @impl Glific.Providers.MessageBehaviour
   @spec receive_location(payload :: map()) :: map()
   def receive_location(_params), do: raise(RuntimeError, message: @not_implemented)
@@ -565,7 +577,14 @@ defmodule Glific.Providers.Swiftchat.Message do
   defp interactive_reply_body(_type, payload) when is_map(payload), do: payload["body"]
   defp interactive_reply_body(_type, _payload), do: nil
 
-  @doc false
+  @doc """
+  F-082(c): unreachable by design, same reasoning as `receive_location/1`
+  above — SwiftChat's documented webhook `type` values
+  (`docs/prds/PRD-001-spike-notes.md` §3) carry no billing-event concept,
+  and `GlificWeb.Providers.Swiftchat.Plugs.Shunt` has no dispatch clause
+  that could ever route a payload here. Exists only to satisfy
+  `MessageBehaviour`.
+  """
   @impl Glific.Providers.MessageBehaviour
   @spec receive_billing_event(payload :: map()) :: {:ok, map()} | {:error, String.t()}
   def receive_billing_event(_params), do: {:error, @not_implemented}
@@ -699,11 +718,58 @@ defmodule Glific.Providers.Swiftchat.Message do
   # HEAD-equivalent content-length check on the media URL, mirroring
   # `Messages.do_validate_media/2`'s technique, failing fast with a
   # logged, user-visible send error per ADR-006.
+  #
+  # F-082(b): a broadcast to N recipients sharing the same media builds a
+  # send per recipient, and each one ran this synchronous Tesla GET in the
+  # broadcast-enqueue loop's own process — N redundant network round-trips
+  # for what is, for a broadcast, always the same URL. Cached per
+  # `(organization_id, source_url)` via `Glific.Caches` (the codebase's
+  # existing org-scoped caching idiom, `lib/glific/CLAUDE.md`) rather than
+  # moved into the worker: the worker only runs once an Oban job already
+  # exists, but the deliberate, tested contract here (see "oversize media"
+  # below) is a SYNCHRONOUS reject at enqueue — no job is ever created for
+  # oversize media, and the caller gets `{:error, _}` immediately. Moving
+  # the check into the worker would silently turn that into an
+  # asynchronous failure instead (the send would enqueue successfully and
+  # only fail later); caching keeps the existing contract while removing
+  # the redundant per-recipient network calls.
+  #
+  # Uses `Caches.get/3` + `Caches.set/4` (a manual read/check/write)
+  # rather than `Caches.fetch/3`'s fallback form deliberately: Cachex's
+  # `fetch/3` dispatches a cache-miss fallback to its own `Courier`
+  # process pool to de-duplicate concurrent misses, which would run the
+  # Tesla GET below in a *different* process than the caller — breaking
+  # `Tesla.Mock`'s per-process mock resolution in every test that
+  # exercises a media send. Running the GET inline here keeps it in the
+  # caller's own process. A transient check failure (network error,
+  # timeout) is deliberately NOT cached — so a momentary blip doesn't
+  # wrongly fail-open (or fail-closed) every later send to the same URL
+  # for the rest of the cache TTL.
   @max_media_bytes 64 * 1024 * 1024
   @spec check_media_size(map(), Glific.Messages.MessageMedia.t() | nil) :: map()
   defp check_media_size(%{error: _} = payload, _message_media), do: payload
 
-  defp check_media_size(payload, %{source_url: url}) when is_binary(url) and url != "" do
+  defp check_media_size(payload, %{source_url: url, organization_id: organization_id})
+       when is_binary(url) and url != "" do
+    cache_key = {:swiftchat_media_size_check, url}
+
+    result =
+      case Caches.get(organization_id, cache_key) do
+        {:ok, false} -> media_size_check_result(organization_id, cache_key, url)
+        {:ok, cached_result} -> cached_result
+      end
+
+    case result do
+      :ok -> payload
+      {:error, message} -> %{error: message}
+    end
+  end
+
+  defp check_media_size(payload, _message_media), do: payload
+
+  @spec media_size_check_result(non_neg_integer(), tuple(), String.t()) ::
+          :ok | {:error, String.t()}
+  defp media_size_check_result(organization_id, cache_key, url) do
     case Tesla.get(url, opts: [adapter: [recv_timeout: 10_000]]) do
       {:ok, %Tesla.Env{status: status, headers: headers}} when status in 200..299 ->
         content_length =
@@ -716,25 +782,29 @@ defmodule Glific.Providers.Swiftchat.Message do
             _ -> nil
           end
 
-        if is_integer(content_length) and content_length > @max_media_bytes do
-          %{
-            error:
-              "Media size exceeds the 64 MB SwiftChat limit (#{content_length} bytes) — send rejected"
-          }
-        else
-          payload
-        end
+        result =
+          if is_integer(content_length) and content_length > @max_media_bytes do
+            {:error,
+             "Media size exceeds the 64 MB SwiftChat limit (#{content_length} bytes) — send rejected"}
+          else
+            :ok
+          end
+
+        Caches.set(organization_id, cache_key, result)
+        result
 
       error ->
         Glific.log_error(
           "SwiftChat: could not verify media size before send — #{Glific.SafeLog.safe_inspect(error)}"
         )
 
-        payload
+        # Transient failure — fail open (matches the pre-caching
+        # behavior) but never write it to the cache, so a later, healthy
+        # check on the same URL gets a fresh answer rather than being
+        # stuck on this blip for the rest of the TTL.
+        :ok
     end
   end
-
-  defp check_media_size(payload, _message_media), do: payload
 
   # SwiftChat's "to" is the recipient's real mobile number (confirmed via
   # the Postman collection) — same as Gupshup's `:destination`. The worker

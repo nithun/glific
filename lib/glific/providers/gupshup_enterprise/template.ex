@@ -68,6 +68,16 @@ defmodule Glific.Providers.GupshupEnterprise.Template do
     {:ok, attrs}
   end
 
+  @doc """
+  Editing an already-approved template is not implemented for Gupshup
+  Enterprise (F-082(a): added to satisfy `TemplateBehaviour`'s
+  `edit_approved_template/2` callback, newly declared on the behaviour —
+  this provider previously had no clause for it at all).
+  """
+  @spec edit_approved_template(integer(), map()) :: {:ok, any} | {:error, any}
+  def edit_approved_template(_template_id, _params),
+    do: {:error, "Gupshup Enterprise does not support editing an approved template"}
+
   @spec import_approved_templates(map()) :: map()
   defp import_approved_templates(template) do
     cleaned_body = String.replace(template["BODY"], "\n\r\n", "\r\n")
