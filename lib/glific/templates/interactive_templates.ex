@@ -8,10 +8,64 @@ defmodule Glific.Templates.InteractiveTemplates do
     Repo,
     Settings,
     Tags.Tag,
+    Templates.InteractiveMessageDescriptor,
     Templates.InteractiveTemplate
   }
 
   import Ecto.Query, warn: false
+
+  # ADR-016 rule 4: the type strings this module's dispatch sites (below)
+  # know how to handle explicitly. Computed once from the same descriptor
+  # T13/T14 use, so this list can never drift from InteractiveTemplate's
+  # own write-time-validated type set.
+  @known_types InteractiveMessageDescriptor.known_types()
+  @known_type_strings Enum.map(@known_types, &Atom.to_string/1)
+
+  # ADR-016 rule 4 ("no silent degradation"): several dispatch sites below
+  # already had a permissive catch-all before this task — for the 3
+  # existing types that's a legitimate, intentional design choice, not a
+  # bug (e.g. `location_request_message` has no "options" to markdown-check,
+  # so `check_options/1`'s catch-all firing for it is correct and expected,
+  # every time, forever). What ADR-016 actually flags as the bug class is a
+  # *genuinely unrecognized* declared type falling through that same silent
+  # path with zero signal. This helper draws exactly that line: log only
+  # when `interactive_content` declares a `"type"` that isn't one of
+  # `InteractiveMessageDescriptor.known_types/0` — content with no "type"
+  # key, or a known type simply lacking some optional structure, stays
+  # silent (matches `InteractiveMessageDescriptor.validate/2`'s own
+  # permissiveness, T13). Every call site below keeps returning its
+  # existing catch-all default unchanged (R1/R2: zero behavior change for
+  # the 3 existing types) — this only adds a log signal for a type value
+  # none of them can produce today.
+  @spec log_if_unknown_type(map() | nil, String.t()) :: :ok
+  defp log_if_unknown_type(%{"type" => type}, site) when type not in @known_type_strings do
+    Glific.log_error(
+      "InteractiveTemplates.#{site}: no explicit handling declared for interactive_content " <>
+        "type #{inspect(type)} (ADR-016 rule 4 safe catch-all) — falling back to the " <>
+        "permissive default for this site"
+    )
+
+    :ok
+  end
+
+  defp log_if_unknown_type(_content, _site), do: :ok
+
+  # Same rule as `log_if_unknown_type/2`, for the handful of dispatch sites
+  # keyed on the row's `type` column (an atom, e.g. `interactive_template.type`)
+  # rather than `interactive_content["type"]` (a string).
+  @spec log_if_unknown_type_atom(atom() | nil, String.t()) :: :ok
+  defp log_if_unknown_type_atom(type, site)
+       when not is_nil(type) and type not in @known_types do
+    Glific.log_error(
+      "InteractiveTemplates.#{site}: no explicit handling declared for interactive type " <>
+        "#{inspect(type)} (ADR-016 rule 4 safe catch-all) — falling back to the permissive " <>
+        "default for this site"
+    )
+
+    :ok
+  end
+
+  defp log_if_unknown_type_atom(_type, _site), do: :ok
 
   @doc """
   Returns the list of interactive templates
@@ -177,7 +231,10 @@ defmodule Glific.Templates.InteractiveTemplates do
     check_options_for_markdown(options_lists)
   end
 
-  defp check_options(_), do: :ok
+  defp check_options(content) do
+    log_if_unknown_type(content, "check_options/1")
+    :ok
+  end
 
   @spec check_options_for_markdown(list()) :: :ok | {:error, String.t()}
   defp check_options_for_markdown(options) when is_list(options) do
@@ -242,7 +299,10 @@ defmodule Glific.Templates.InteractiveTemplates do
     body_length + action_length
   end
 
-  defp calculate_total_length(_), do: 0
+  defp calculate_total_length(content) do
+    log_if_unknown_type(content, "calculate_total_length/1")
+    0
+  end
 
   @spec validate_interactive_content_length(map()) :: :ok | {:error, String.t()}
   defp validate_interactive_content_length(attrs) do
@@ -399,7 +459,10 @@ defmodule Glific.Templates.InteractiveTemplates do
     }
   end
 
-  defp trim_content(map, _label), do: map
+  defp trim_content(map, _label) do
+    log_if_unknown_type(map, "trim_content/2")
+    map
+  end
 
   @spec trim_field(String.t() | nil, integer()) :: String.t() | nil
   defp trim_field(nil, _), do: nil
@@ -500,7 +563,10 @@ defmodule Glific.Templates.InteractiveTemplates do
        when is_map(interactive_content),
        do: interactive_content["body"]["text"]
 
-  defp do_get_interactive_body(_, _, _), do: ""
+  defp do_get_interactive_body(interactive_content, _type, _content_type) do
+    log_if_unknown_type(interactive_content, "do_get_interactive_body/3")
+    ""
+  end
 
   @doc """
   Fetch for translation of interactive message
@@ -531,8 +597,10 @@ defmodule Glific.Templates.InteractiveTemplates do
     Map.put(interactive_content, "content", updated_content)
   end
 
-  def get_clean_interactive_content(interactive_content, _send_interactive_title, _type),
-    do: interactive_content
+  def get_clean_interactive_content(interactive_content, _send_interactive_title, type) do
+    log_if_unknown_type_atom(type, "get_clean_interactive_content/3")
+    interactive_content
+  end
 
   @spec clean_string(String.t()) :: String.t()
   defp clean_string(str, length \\ 60),
@@ -558,7 +626,10 @@ defmodule Glific.Templates.InteractiveTemplates do
       else: put_in(interactive_content["content"]["header"], clean_string(content["header"]))
   end
 
-  def clean_template_title(interactive_content), do: interactive_content
+  def clean_template_title(interactive_content) do
+    log_if_unknown_type(interactive_content, "clean_template_title/1")
+    interactive_content
+  end
 
   @doc """
   Get translated interactive template content
@@ -598,6 +669,14 @@ defmodule Glific.Templates.InteractiveTemplates do
     media.id
   end
 
+  # ADR-016 rule 4 note (deliberately NOT logged, unlike this module's other
+  # catch-alls): `type` here is the *nested* media content-type
+  # (`interactive_content["content"]["type"]`, e.g. "image"/"file"/"video"),
+  # not the top-level interactive type. This clause is the overwhelmingly
+  # common, entirely expected path — every plain-text quick_reply and every
+  # list/location message has no media at all — so logging on it would be
+  # noise on the majority case, not a degradation signal. There is no
+  # top-level-type-based unknown-type gap to close here.
   defp do_get_media(_interactive_content, _type, _organization_id), do: nil
 
   @doc """
@@ -638,8 +717,10 @@ defmodule Glific.Templates.InteractiveTemplates do
     |> process_dynamic_attachments(attachment)
   end
 
-  def process_dynamic_interactive_content(interactive_content, _params, _attachment),
-    do: interactive_content
+  def process_dynamic_interactive_content(interactive_content, _params, _attachment) do
+    log_if_unknown_type(interactive_content, "process_dynamic_interactive_content/3")
+    interactive_content
+  end
 
   ## We might need to move this function to gupshup provider
   ## since this is specific to that only but this is fine for now.
@@ -750,6 +831,31 @@ defmodule Glific.Templates.InteractiveTemplates do
       language_code_map,
       organization_id
     )
+  end
+
+  # ADR-016 rule 4: this function had NO catch-all before T15 — any type
+  # beyond the 3 clauses above hit a bare `FunctionClauseError` (the exact
+  # crash class the ADR names by this function's own arity, "rule 4"). A
+  # type with no translator declared here simply produces no translations
+  # (an empty map) instead of crashing `translate_interactive_template/1`,
+  # which passes this straight into `update_interactive_template/2`'s
+  # `translations` field — an empty map there is a safe, valid no-op, not
+  # data loss (the untranslated `interactive_content` itself is untouched).
+  defp translate_interactive_content(
+         type,
+         _interactive_content,
+         _active_languages,
+         _language_code_map,
+         _organization_id,
+         _label
+       ) do
+    Glific.log_error(
+      "InteractiveTemplates.translate_interactive_content/6: no translator declared for " <>
+        "type #{inspect(type)} (ADR-016 rule 4) — skipping translation, interactive_content " <>
+        "itself is unaffected"
+    )
+
+    %{}
   end
 
   @spec translate_quick_reply(map(), map(), map(), non_neg_integer(), String.t()) :: map()
@@ -1028,9 +1134,27 @@ defmodule Glific.Templates.InteractiveTemplates do
 
     csv_data =
       case type do
-        "list" -> build_list_csv_data(translations, language_codes)
-        "quick_reply" -> build_quick_reply_csv_data(translations, language_codes)
-        "location_request_message" -> build_location_csv_data(translations, language_codes)
+        "list" ->
+          build_list_csv_data(translations, language_codes)
+
+        "quick_reply" ->
+          build_quick_reply_csv_data(translations, language_codes)
+
+        "location_request_message" ->
+          build_location_csv_data(translations, language_codes)
+
+        # ADR-016 rule 4: this `case` had NO catch-all before T15 — any
+        # type beyond these 3 hit a bare `CaseClauseError`, crashing the
+        # export. A type with no CSV builder declared here now exports a
+        # header-only CSV (no data rows) instead of crashing, and logs so
+        # the gap is visible rather than silently shipping an empty file.
+        other ->
+          Glific.log_error(
+            "InteractiveTemplates.generate_csv_data/1: no CSV export declared for type " <>
+              "#{inspect(other)} (ADR-016 rule 4) — exporting header row only"
+          )
+
+          [["Attribute" | get_language_names(language_codes)]]
       end
 
     data =
@@ -1279,6 +1403,20 @@ defmodule Glific.Templates.InteractiveTemplates do
 
         "location_request_message" ->
           import_location_message(translations, content, language_codes, lang_index)
+
+        # ADR-016 rule 4: this `case` had NO catch-all before T15 — any
+        # type beyond these 3 hit a bare `CaseClauseError`, crashing the
+        # import. A type with no CSV importer declared here now imports no
+        # translations (empty map, same safe no-op as
+        # `translate_interactive_content/6`'s catch-all) instead of
+        # crashing, and logs so the gap is visible.
+        other ->
+          Glific.log_error(
+            "InteractiveTemplates.import_interactive_template/2: no CSV import declared for " <>
+              "type #{inspect(other)} (ADR-016 rule 4) — no translations imported"
+          )
+
+          %{}
       end
 
     update_interactive_template(interactive_template, %{translations: imported_data})
