@@ -41,7 +41,7 @@ defmodule Glific.Templates.InteractiveTemplates do
   defp log_if_unknown_type(%{"type" => type}, site) when type not in @known_type_strings do
     Glific.log_error(
       "InteractiveTemplates.#{site}: no explicit handling declared for interactive_content " <>
-        "type #{inspect(type)} (ADR-016 rule 4 safe catch-all) — falling back to the " <>
+        "type #{Glific.SafeLog.safe_inspect(type)} (ADR-016 rule 4 safe catch-all) — falling back to the " <>
         "permissive default for this site"
     )
 
@@ -58,7 +58,7 @@ defmodule Glific.Templates.InteractiveTemplates do
        when not is_nil(type) and type not in @known_types do
     Glific.log_error(
       "InteractiveTemplates.#{site}: no explicit handling declared for interactive type " <>
-        "#{inspect(type)} (ADR-016 rule 4 safe catch-all) — falling back to the permissive " <>
+        "#{Glific.SafeLog.safe_inspect(type)} (ADR-016 rule 4 safe catch-all) — falling back to the permissive " <>
         "default for this site"
     )
 
@@ -851,7 +851,7 @@ defmodule Glific.Templates.InteractiveTemplates do
        ) do
     Glific.log_error(
       "InteractiveTemplates.translate_interactive_content/6: no translator declared for " <>
-        "type #{inspect(type)} (ADR-016 rule 4) — skipping translation, interactive_content " <>
+        "type #{Glific.SafeLog.safe_inspect(type)} (ADR-016 rule 4) — skipping translation, interactive_content " <>
         "itself is unaffected"
     )
 
@@ -1151,7 +1151,7 @@ defmodule Glific.Templates.InteractiveTemplates do
         other ->
           Glific.log_error(
             "InteractiveTemplates.generate_csv_data/1: no CSV export declared for type " <>
-              "#{inspect(other)} (ADR-016 rule 4) — exporting header row only"
+              "#{Glific.SafeLog.safe_inspect(other)} (ADR-016 rule 4) — exporting header row only"
           )
 
           [["Attribute" | get_language_names(language_codes)]]
@@ -1413,7 +1413,7 @@ defmodule Glific.Templates.InteractiveTemplates do
         other ->
           Glific.log_error(
             "InteractiveTemplates.import_interactive_template/2: no CSV import declared for " <>
-              "type #{inspect(other)} (ADR-016 rule 4) — no translations imported"
+              "type #{Glific.SafeLog.safe_inspect(other)} (ADR-016 rule 4) — no translations imported"
           )
 
           %{}

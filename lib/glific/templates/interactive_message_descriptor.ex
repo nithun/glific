@@ -99,8 +99,8 @@ defmodule Glific.Templates.InteractiveMessageDescriptor do
     cond do
       content_type != declared_type ->
         {:error,
-         "interactive_content[\"type\"] (#{inspect(content_type)}) does not match this " <>
-           "template's type (#{inspect(declared_type)})"}
+         "interactive_content[\"type\"] (#{Glific.SafeLog.safe_inspect(content_type)}) does not match this " <>
+           "template's type (#{Glific.SafeLog.safe_inspect(declared_type)})"}
 
       Map.has_key?(@descriptors, type) ->
         validate_required_keys(type, content)

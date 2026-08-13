@@ -109,7 +109,7 @@ defmodule Glific.Templates.InteractiveMessageDescriptorTest do
       assert message =~ "options"
     end
 
-    test "list missing \"globalButtons\" and \"items\"" do
+    test ~s(list missing "globalButtons" and "items") do
       content = %{"type" => "list", "title" => "t", "body" => "b"}
 
       assert {:error, message} = InteractiveMessageDescriptor.validate(:list, content)
