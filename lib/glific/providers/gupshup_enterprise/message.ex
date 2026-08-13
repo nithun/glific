@@ -70,22 +70,33 @@ defmodule Glific.Providers.Gupshup.Enterprise.Message do
   end
 
   @doc false
-  @spec send_interactive(Message.t(), map()) :: {:ok, Oban.Job.t()} | {:error, Ecto.Changeset.t()}
+  @spec send_interactive(Message.t(), map()) ::
+          {:ok, Oban.Job.t()} | {:error, Ecto.Changeset.t()} | {:error, String.t()}
   def send_interactive(message, attrs) do
-    interactive_content = parse_interactive_message(attrs.interactive_content, message.type)
+    case parse_interactive_message(attrs.interactive_content, message.type) do
+      {:error, _reason} = error ->
+        Glific.log_error(
+          "Gupshup Enterprise: unsupported interactive message type " <>
+            Glific.SafeLog.safe_inspect(message.type) <>
+            " for message id #{message.id} — no mapping exists in parse_interactive_message/2, send skipped"
+        )
 
-    interactive_media_type =
-      get_in(attrs, [:interactive_content, "content", "type"])
-      |> then(&if &1 == "file", do: "document", else: &1)
+        error
 
-    %{
-      interactive_content: interactive_content,
-      msg: get_in(attrs, [:interactive_content, "content", "text"]) || message.body,
-      interactive_type: message.type,
-      media_url: get_in(attrs, [:interactive_content, "content", "url"]),
-      interactive_media_type: interactive_media_type
-    }
-    |> send_message(message, attrs)
+      interactive_content ->
+        interactive_media_type =
+          get_in(attrs, [:interactive_content, "content", "type"])
+          |> then(&if &1 == "file", do: "document", else: &1)
+
+        %{
+          interactive_content: interactive_content,
+          msg: get_in(attrs, [:interactive_content, "content", "text"]) || message.body,
+          interactive_type: message.type,
+          media_url: get_in(attrs, [:interactive_content, "content", "url"]),
+          interactive_media_type: interactive_media_type
+        }
+        |> send_message(message, attrs)
+    end
   end
 
   @doc false
@@ -100,7 +111,7 @@ defmodule Glific.Providers.Gupshup.Enterprise.Message do
     |> send_message(message, attrs)
   end
 
-  @spec parse_interactive_message(map(), atom()) :: map()
+  @spec parse_interactive_message(map(), atom()) :: map() | {:error, String.t()}
   defp parse_interactive_message(interactive_content, :quick_reply),
     do: %{"buttons" => parse_buttons(interactive_content["options"])}
 
@@ -109,6 +120,20 @@ defmodule Glific.Providers.Gupshup.Enterprise.Message do
       "button" => interactive_content["globalButtons"] |> List.first() |> Map.get("title"),
       "sections" => parse_section(interactive_content["items"])
     }
+  end
+
+  # F-085: pre-existing bug — Gupshup Enterprise only ever mapped
+  # `:quick_reply`/`:list`; any other interactive type (notably
+  # `:location_request_message`, seeded as an interactive template type
+  # per `Glific.Enums.InteractiveMessageType`) hit a `FunctionClauseError`
+  # here with no catch-all, crashing the send instead of failing loudly.
+  # Every new interactive type (ADR-016) widens this blast radius until
+  # closed — do NOT remove/reorder the two typed clauses above (R2: no
+  # change to existing quick_reply/list positive behavior).
+  defp parse_interactive_message(_interactive_content, type) do
+    {:error,
+     "Gupshup Enterprise: no interactive-message mapping exists for type " <>
+       Glific.SafeLog.safe_inspect(type)}
   end
 
   @spec parse_buttons(list()) :: list()
