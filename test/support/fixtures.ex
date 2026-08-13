@@ -46,6 +46,7 @@ defmodule Glific.Fixtures do
     Partners.Organization,
     Partners.Provider,
     Profiles.Profile,
+    Providers.MediaAssets,
     Providers.Maytapi.Message,
     Registrations,
     Registrations.Registration,
@@ -260,6 +261,23 @@ defmodule Glific.Fixtures do
     Partners.fill_cache(organization)
 
     organization
+  end
+
+  @doc false
+  @spec provider_media_asset_fixture(map()) :: MediaAssets.ProviderMediaAsset.t()
+  def provider_media_asset_fixture(attrs) do
+    valid_attrs = %{
+      provider: "swiftchat",
+      source_url: "https://example.com/media/#{Ecto.UUID.generate()}.jpg",
+      content_sha256: :crypto.hash(:sha256, Ecto.UUID.generate()) |> Base.encode16(case: :lower),
+      provider_media_id: "provider-media-id-#{Ecto.UUID.generate()}"
+    }
+
+    attrs = Map.merge(valid_attrs, attrs)
+
+    {:ok, provider_media_asset} = MediaAssets.create_provider_media_asset(attrs)
+
+    provider_media_asset
   end
 
   @doc false
