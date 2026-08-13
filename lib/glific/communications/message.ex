@@ -14,6 +14,7 @@ defmodule Glific.Communications.Message do
     Messages.Message,
     Partners,
     Repo,
+    Templates.InteractiveMessageDescriptor,
     WhatsappFormsResponses
   }
 
@@ -46,7 +47,8 @@ defmodule Glific.Communications.Message do
       "Sending message: type: '#{message.type}', contact_id: '#{message.receiver.id}', message_id: '#{message.id}'"
     )
 
-    with {:ok, _} <-
+    with :ok <- check_interactive_capability(message),
+         {:ok, _} <-
            apply(
              Communications.provider_handler(message.organization_id),
              @type_to_token[message.type],
@@ -71,6 +73,33 @@ defmodule Glific.Communications.Message do
     # via the provider fails
     _ ->
       log_error(message, "Could not send message to contact: Check Gupshup Setting")
+  end
+
+  # ADR-016 rule 3: capability is declared, not inferred. For interactive
+  # message types, refuse an unsupported (provider, type) pair loudly here —
+  # before the provider module is ever reached — instead of letting it hit
+  # a `FunctionClauseError` (F-085, Gupshup Enterprise's pre-T06 behavior)
+  # or fall through to this function's own `rescue`, which produces the
+  # misleading generic "Check Gupshup Setting" message. Non-interactive
+  # types (not in `@type_to_token` as `:send_interactive`) are untouched —
+  # this is purely an additive pre-check on the interactive-send path.
+  @spec check_interactive_capability(Message.t()) :: :ok | {:error, String.t()}
+  defp check_interactive_capability(%{type: type} = message) do
+    if @type_to_token[type] == :send_interactive do
+      provider = Partners.organization(message.organization_id).bsp.shortcode
+
+      if InteractiveMessageDescriptor.supported?(provider, type) do
+        :ok
+      else
+        Glific.log_error(
+          "#{provider}: interactive message type #{inspect(type)} is not declared as " <>
+            "supported (ADR-016 rule 3) for message id #{message.id} — rejected before " <>
+            "provider dispatch, not sent"
+        )
+      end
+    else
+      :ok
+    end
   end
 
   @spec log_error(Message.t(), String.t()) :: {:error, String.t()}
