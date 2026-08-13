@@ -647,6 +647,33 @@ defmodule Glific.Providers.Swiftchat.MessageTest do
       assert {:error, ^error_msg} = Glific.Providers.Swiftchat.Message.send_image(second_message)
       assert Agent.get(get_call_count, & &1) == 1
     end
+
+    test "T05(b)/F-082 follow-up: the size-check cache entry uses a short explicit TTL, not the 24h default",
+         attrs do
+      source_url = "https://example.com/short-ttl-size-check.png"
+
+      Tesla.Mock.mock(fn
+        %{method: :post} ->
+          %Tesla.Env{status: 201, body: Jason.encode!(%{"id" => Ecto.UUID.generate()})}
+
+        %{method: :get} ->
+          %Tesla.Env{status: 200, headers: [{"content-length", "1024"}], body: ""}
+      end)
+
+      message = media_message_fixture(attrs, :image, source_url)
+      assert {:ok, _job} = Glific.Providers.Swiftchat.Message.send_image(message)
+
+      cache_key = {:swiftchat_media_size_check, source_url}
+
+      assert {:ok, ttl_ms} =
+               Cachex.ttl(:glific_cache, {attrs.organization_id, cache_key})
+
+      # must be set (not nil/persistent) and well under the 24h default —
+      # asserting < 2h leaves headroom while still catching a regression
+      # back to the unqualified `Caches.set/3` default TTL.
+      refute is_nil(ttl_ms)
+      assert ttl_ms <= :timer.hours(2)
+    end
   end
 
   describe "receive_media/1 (F-082(d): direct unit coverage — previously controller-only)" do

@@ -772,7 +772,39 @@ defmodule Glific.Providers.Swiftchat.Message do
   # timeout) is deliberately NOT cached — so a momentary blip doesn't
   # wrongly fail-open (or fail-closed) every later send to the same URL
   # for the rest of the cache TTL.
+  #
+  # T05(b)/F-082 follow-up (code review, PRD-005 Phase 0) — two honest
+  # limits on the above, corrected here rather than left overclaimed:
+  #
+  # (i) "N GETs -> 1 GET" is a WARM-CACHE-ONLY benefit. The `Caches.get/3`
+  #     + `Caches.set/4` pair is not atomic (deliberately, see above — an
+  #     atomic `fetch/3` would break `Tesla.Mock`'s per-process mock
+  #     resolution). For the *initial* concurrent broadcast burst, each
+  #     recipient's Oban-enqueue call can independently observe a cache
+  #     miss before any of them has written the result back, so several
+  #     GETs can still race through on a cold cache — this reduces
+  #     redundant GETs after the first roundtrip completes and caches, it
+  #     does not guarantee exactly one GET per broadcast. A real
+  #     single-flight dedup (Cachex `fetch/3`/Courier, or a per-URL lock)
+  #     was considered and rejected for the `Tesla.Mock` reason above;
+  #     revisit only if this Tesla.Mock constraint is otherwise resolved.
+  # (ii) The default 24h TTL (`Caches.set/4`'s `@ttl_limit`) means a media
+  #      file replaced at the same `source_url` can reuse a stale
+  #      size-check verdict for up to a day (e.g. a legitimately-oversize
+  #      replacement upload could reuse a cached `:ok` and be sent
+  #      anyway). `Caches.set/4` accepts a `ttl:` opt cheaply (merged over
+  #      the 24h default — see `Glific.Caches.set_to_cache/4`), so this
+  #      cache key uses a much shorter explicit TTL instead, trading a bit
+  #      of the broadcast-dedup benefit in (i) for a much smaller
+  #      staleness window.
   @max_media_bytes 64 * 1024 * 1024
+  # Short deliberately (vs. the 24h default): this cache exists purely to
+  # de-duplicate a single broadcast's redundant GETs to the same media
+  # URL, not to be a long-lived source-of-truth for a URL's size. A real
+  # broadcast's recipient-enqueue loop runs in well under an hour; beyond
+  # that, a fresh check on the next send is worth the staleness protection
+  # per (ii) above.
+  @media_size_check_ttl :timer.hours(1)
   @spec check_media_size(map(), Glific.Messages.MessageMedia.t() | nil) :: map()
   defp check_media_size(%{error: _} = payload, _message_media), do: payload
 
@@ -817,7 +849,7 @@ defmodule Glific.Providers.Swiftchat.Message do
             :ok
           end
 
-        Caches.set(organization_id, cache_key, result)
+        Caches.set(organization_id, cache_key, result, ttl: @media_size_check_ttl)
         result
 
       error ->
