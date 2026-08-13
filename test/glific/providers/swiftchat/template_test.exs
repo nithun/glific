@@ -223,6 +223,32 @@ defmodule Glific.Providers.Swiftchat.TemplateTest do
       assert message =~ "ADR-005"
     end
 
+    test "F-081: rejects an HSM text template with has_buttons: true without calling the BSP",
+         %{organization_id: organization_id} do
+      Tesla.Mock.mock(fn _env ->
+        flunk("BSP should not have been called for a button-carrying template")
+      end)
+
+      attrs = %{
+        shortcode: "button_template",
+        type: :text,
+        body: "Hi {{1}}",
+        has_buttons: true,
+        button_type: "quick_reply",
+        buttons: [%{"text" => "Yes"}],
+        organization_id: organization_id
+      }
+
+      assert {:error, message} = Template.submit_for_approval(attrs)
+      assert message =~ "buttons"
+      assert message =~ "not supported"
+
+      refute Repo.get_by(SessionTemplate,
+               shortcode: "button_template",
+               organization_id: organization_id
+             )
+    end
+
     test "rejects an invalid shortcode before calling the BSP",
          %{organization_id: organization_id} do
       Tesla.Mock.mock(fn _env ->

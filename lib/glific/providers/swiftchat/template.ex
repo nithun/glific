@@ -82,6 +82,20 @@ defmodule Glific.Providers.Swiftchat.Template do
     {:error, "SwiftChat template sync supports text templates only in this phase — see ADR-005"}
   end
 
+  # F-081: `has_buttons`/`buttons` pass Glific's own `validate_button_template/1`
+  # (button *shape* is valid) but this module's payload build only ever reads
+  # `attrs.body` — buttons would be silently dropped end-to-end, and
+  # `send_hsm_text/2` never sends button data either, so the save would look
+  # successful while quietly shipping a text-only template. Reject loudly
+  # instead of guessing a button payload SwiftChat's docs never confirmed
+  # (mirrors the non-text-type guard above) until F-18 ships real button
+  # support.
+  def submit_for_approval(%{has_buttons: true} = _attrs) do
+    {:error,
+     "SwiftChat HSM templates with buttons are not supported yet — buttons would be " <>
+       "silently dropped (see F-081); use a plain text template until F-18 ships button support"}
+  end
+
   def submit_for_approval(attrs) do
     with {:ok, name} <- build_template_name(attrs),
          swiftchat_body <- glific_vars_to_swiftchat(attrs.body || ""),
