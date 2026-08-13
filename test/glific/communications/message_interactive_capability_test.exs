@@ -13,6 +13,8 @@ defmodule Glific.Communications.MessageInteractiveCapabilityTest do
     Communications,
     Contacts,
     Messages,
+    Messages.Message,
+    Notifications,
     Partners,
     Partners.Provider,
     Repo,
@@ -99,6 +101,9 @@ defmodule Glific.Communications.MessageInteractiveCapabilityTest do
          %{organization_id: organization_id, receiver_id: receiver_id} do
       interactive_template = fetch_seeded_interactive(organization_id, "Quick Reply Text")
 
+      notification_count_before =
+        Notifications.count_notifications(%{filter: %{organization_id: organization_id}})
+
       message_attrs = %{
         body: nil,
         flow: :outbound,
@@ -112,6 +117,29 @@ defmodule Glific.Communications.MessageInteractiveCapabilityTest do
       assert error_msg =~ "maytapi"
       assert error_msg =~ "quick_reply"
       refute error_msg =~ "Check Gupshup Setting"
+
+      # T18: the rejection must leave the message at status :error (never stuck
+      # :enqueued) and must produce a Notifications row — the same outcome an
+      # NGO admin would see for any other failed send. Fetched fresh from the
+      # DB (not the in-memory struct handed to send_message/2) so the
+      # assertion actually exercises the `Messages.update_message/2` write in
+      # `Communications.Message`'s private `log_error/2`.
+      persisted_message = Repo.get_by!(Message, receiver_id: receiver_id)
+      assert persisted_message.status == :error
+
+      notification_count_after =
+        Notifications.count_notifications(%{filter: %{organization_id: organization_id}})
+
+      assert notification_count_after == notification_count_before + 1
+
+      [notification | _] =
+        Notifications.list_notifications(%{
+          filter: %{organization_id: organization_id},
+          opts: %{order: :desc, limit: 1, offset: 0}
+        })
+
+      assert notification.message =~ "maytapi"
+      assert notification.message =~ "quick_reply"
     end
 
     test "send_message/2 itself returns the rejection directly, confirming the provider module is never reached",

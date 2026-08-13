@@ -91,7 +91,8 @@ defmodule Glific.Communications.Message do
       if InteractiveMessageDescriptor.supported?(provider, type) do
         :ok
       else
-        Glific.log_error(
+        log_error(
+          message,
           "#{provider}: interactive message type #{inspect(type)} is not declared as " <>
             "supported (ADR-016 rule 3) for message id #{message.id} — rejected before " <>
             "provider dispatch, not sent"
