@@ -645,6 +645,7 @@ defmodule GlificWeb.Schema.OrganizationTest do
     assert services["whatsapp_group_enabled"] == false
     assert services["whatsapp_forms_enabled"] == false
     assert services["certificate_enabled"] == false
+    assert services["swiftchatInteractiveTypesEnabled"] == false
   end
 
   test "update an organization with organization settings", %{user: user} do

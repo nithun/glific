@@ -548,7 +548,8 @@ defmodule Glific.Flags do
       :high_trigger_tps_enabled,
       :ai_evaluations,
       :is_gpt_vision_base64_enabled,
-      :is_prompt_generator_enabled
+      :is_prompt_generator_enabled,
+      :is_swiftchat_interactive_types_enabled
     ]
     |> Enum.each(fn flag ->
       if !FunWithFlags.enabled?(

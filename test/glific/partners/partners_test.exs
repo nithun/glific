@@ -1617,6 +1617,7 @@ defmodule Glific.PartnersTest do
       assert organization_services["dialogflow"] == false
       assert organization_services["fun_with_flags"] == true
       assert organization_services["google_cloud_storage"] == false
+      assert organization_services["swiftchat_interactive_types_enabled"] == false
 
       valid_attrs = %{
         secrets: %{"service_account" => @default_goth_json},

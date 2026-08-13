@@ -35,6 +35,7 @@ defmodule GlificWeb.Schema.OrganizationTypes do
     field(:copy_node_enabled, :boolean)
     field(:superset_enabled, :boolean)
     field(:prompt_generator_enabled, :boolean)
+    field(:swiftchat_interactive_types_enabled, :boolean)
   end
 
   object :organization_export_result do
