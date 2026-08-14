@@ -19,7 +19,8 @@ defmodule Glific.Providers.Swiftchat.Media do
 
   alias Glific.{
     Providers.MediaAssets,
-    Providers.Swiftchat.ApiClient
+    Providers.Swiftchat.ApiClient,
+    Repo
   }
 
   @provider "swiftchat"
@@ -53,12 +54,22 @@ defmodule Glific.Providers.Swiftchat.Media do
   function never sets `force_reupload: true` on itself, so there is no
   internal recursion for this to loop on. The caller (currently only
   `send_with_media_id/4`) is what bounds the retry to exactly one call.
+
+  This is a public entry point, so it self-scopes: `Repo.put_organization_id/1`
+  is called first (idempotent) so every registry read/write inside this
+  module is governed by the explicit `organization_id` parameter rather than
+  whatever org (if any) happens to already be in this process's process
+  dictionary. This is what makes the ADR-017 "call from inside an Oban
+  worker that has already called `Repo.put_process_state/1`" precondition
+  structural instead of a caller obligation to remember.
   """
   @spec resolve_media_id(non_neg_integer(), String.t(), String.t(), boolean()) ::
           {:ok, String.t()} | {:error, String.t()}
   def resolve_media_id(organization_id, source_url, content_type, force_reupload \\ false)
 
   def resolve_media_id(organization_id, source_url, content_type, force_reupload) do
+    Repo.put_organization_id(organization_id)
+
     with {:ok, %{content: content, content_sha256: content_sha256}} <-
            fetch_content(source_url) do
       if force_reupload do
@@ -88,11 +99,16 @@ defmodule Glific.Providers.Swiftchat.Media do
 
   If the initial `resolve_media_id/4` call itself fails (fetch/upload
   error), `send_fn` is never invoked.
+
+  Also self-scopes via `Repo.put_organization_id/1` (idempotent) as the
+  other public entry point into this module — see `resolve_media_id/4`.
   """
   @spec send_with_media_id(non_neg_integer(), String.t(), String.t(), send_fn()) ::
           {:ok, term()} | {:error, term()} | {:error, String.t()}
   def send_with_media_id(organization_id, source_url, content_type, send_fn)
       when is_function(send_fn, 1) do
+    Repo.put_organization_id(organization_id)
+
     with {:ok, media_id} <- resolve_media_id(organization_id, source_url, content_type) do
       case send_fn.(media_id) do
         {:error, %{"code" => 4}} ->

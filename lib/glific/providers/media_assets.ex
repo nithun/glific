@@ -104,6 +104,22 @@ defmodule Glific.Providers.MediaAssets do
   self-healing re-upload path), the existing row's `provider_media_id`
   (and `content_type`) are updated in place rather than inserting a
   duplicate.
+
+  Conflict-safe against the concurrent-resolver race: two processes can both
+  read a cache miss from `fetch_by_content/3` before either has inserted
+  (upload-on-miss is not itself locked), so the `INSERT` here can lose to a
+  sibling process's `INSERT` on the composite
+  `provider_media_assets_org_provider_url_hash_index` unique constraint. When
+  that happens we do NOT surface the insert error to the caller — we
+  re-fetch and return the winning row, exactly as if we'd hit the cache in
+  the first place.
+
+  Semantic decision: the LOSER's freshly-uploaded `provider_media_id` (the
+  attrs this call was about to insert) is discarded in favor of the
+  winner's already-committed id. The orphaned upload on the BSP side is
+  accepted as-is — SwiftChat delete is soft/best-effort per the ADR-017
+  audit, so there is no reliable cleanup call to make here anyway, and the
+  bounded quota risk of a stray upload is tracked by the D5 ask.
   """
   @spec put_asset(map()) :: {:ok, ProviderMediaAsset.t()} | {:error, Ecto.Changeset.t()}
   def put_asset(
@@ -117,8 +133,50 @@ defmodule Glific.Providers.MediaAssets do
         )
 
       {:error, _reason} ->
-        create_provider_media_asset(attrs)
+        attrs
+        |> create_provider_media_asset()
+        |> handle_create_conflict(provider, source_url, content_sha256)
     end
+  end
+
+  @spec handle_create_conflict(
+          {:ok, ProviderMediaAsset.t()} | {:error, Ecto.Changeset.t()},
+          String.t(),
+          String.t(),
+          String.t()
+        ) :: {:ok, ProviderMediaAsset.t()} | {:error, Ecto.Changeset.t()}
+  defp handle_create_conflict({:ok, asset}, _provider, _source_url, _content_sha256),
+    do: {:ok, asset}
+
+  defp handle_create_conflict(
+         {:error, %Ecto.Changeset{} = changeset},
+         provider,
+         source_url,
+         content_sha256
+       ) do
+    if content_identity_conflict?(changeset) do
+      case fetch_by_content(provider, source_url, content_sha256) do
+        {:ok, winner} -> {:ok, winner}
+        {:error, _reason} -> {:error, changeset}
+      end
+    else
+      {:error, changeset}
+    end
+  end
+
+  # Detects the specific composite-unique-constraint violation declared by
+  # `ProviderMediaAsset.changeset/2`'s
+  # `unique_constraint([:organization_id, :provider, :source_url,
+  # :content_sha256], name: :provider_media_assets_org_provider_url_hash_index)`
+  # — as opposed to any other validation/constraint error the insert could
+  # have failed with, which must still surface to the caller.
+  @spec content_identity_conflict?(Ecto.Changeset.t()) :: boolean()
+  defp content_identity_conflict?(%Ecto.Changeset{errors: errors}) do
+    Enum.any?(errors, fn {_field, {_message, opts}} ->
+      Keyword.get(opts, :constraint) == :unique and
+        Keyword.get(opts, :constraint_name) ==
+          "provider_media_assets_org_provider_url_hash_index"
+    end)
   end
 
   @doc """

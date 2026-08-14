@@ -181,6 +181,50 @@ defmodule Glific.Providers.Swiftchat.MediaTest do
 
       assert asset.provider_media_id == "provider-media-id-fresh"
     end
+
+    test "self-scopes from the explicit organization_id even when the process's org context is stale/mis-set",
+         attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      # A different org, deliberately left as the process's CURRENT org
+      # context — simulating a reused process (e.g. a pooled worker) whose
+      # process dictionary still points at whatever org it last handled.
+      # `resolve_media_id/4` must not trust this; it must (re)scope itself
+      # from its own explicit `organization_id` argument (the ADR-017
+      # Oban-worker precondition made structural).
+      other_organization = Fixtures.organization_fixture()
+      Repo.put_organization_id(other_organization.id)
+      assert Repo.get_organization_id() == other_organization.id
+      assert other_organization.id != attrs.organization_id
+
+      Tesla.Mock.mock(fn
+        %{method: :get, url: @source_url} ->
+          %Tesla.Env{status: 200, body: @content}
+
+        %{method: :post} ->
+          %Tesla.Env{status: 201, body: Jason.encode!(%{"id" => "provider-media-id-scoped"})}
+      end)
+
+      assert {:ok, "provider-media-id-scoped"} =
+               Media.resolve_media_id(attrs.organization_id, @source_url, @content_type)
+
+      # Lands under the EXPLICIT org passed to resolve_media_id/4, not the
+      # stale org that was in the process dictionary beforehand.
+      Repo.put_organization_id(attrs.organization_id)
+
+      assert {:ok, asset} =
+               MediaAssets.fetch_by_content("swiftchat", @source_url, @content_sha256)
+
+      assert asset.provider_media_id == "provider-media-id-scoped"
+      assert asset.organization_id == attrs.organization_id
+
+      # And is NOT visible under the stale org's scope — confirming this
+      # isn't just "found somewhere," it is scoped to the right tenant.
+      Repo.put_organization_id(other_organization.id)
+
+      assert {:error, _reason} =
+               MediaAssets.fetch_by_content("swiftchat", @source_url, @content_sha256)
+    end
   end
 
   describe "send_with_media_id/4 (self-healing hook, GL-002)" do
@@ -211,6 +255,45 @@ defmodule Glific.Providers.Swiftchat.MediaTest do
                )
 
       assert count(send_calls) == 1
+    end
+
+    test "self-scopes from the explicit organization_id even when the process's org context is stale/mis-set",
+         attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      other_organization = Fixtures.organization_fixture()
+      Repo.put_organization_id(other_organization.id)
+      assert Repo.get_organization_id() == other_organization.id
+      assert other_organization.id != attrs.organization_id
+
+      Tesla.Mock.mock(fn
+        %{method: :get, url: @source_url} ->
+          %Tesla.Env{status: 200, body: @content}
+
+        %{method: :post} ->
+          %Tesla.Env{status: 201, body: Jason.encode!(%{"id" => "provider-media-id-scoped"})}
+      end)
+
+      send_fn = fn media_id ->
+        assert media_id == "provider-media-id-scoped"
+        {:ok, :sent}
+      end
+
+      assert {:ok, :sent} =
+               Media.send_with_media_id(
+                 attrs.organization_id,
+                 @source_url,
+                 @content_type,
+                 send_fn
+               )
+
+      Repo.put_organization_id(attrs.organization_id)
+
+      assert {:ok, asset} =
+               MediaAssets.fetch_by_content("swiftchat", @source_url, @content_sha256)
+
+      assert asset.provider_media_id == "provider-media-id-scoped"
+      assert asset.organization_id == attrs.organization_id
     end
 
     test "a synthetic code-4 'Invalid media ID' response triggers exactly one re-upload and one retry, then succeeds",

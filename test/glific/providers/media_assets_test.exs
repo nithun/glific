@@ -6,6 +6,8 @@ defmodule Glific.Providers.MediaAssetsTest do
   """
   use Glific.DataCase, async: true
 
+  alias Ecto.Adapters.SQL.Sandbox
+
   alias Glific.{
     Fixtures,
     Providers.MediaAssets,
@@ -212,6 +214,102 @@ defmodule Glific.Providers.MediaAssetsTest do
 
       assert refetched.id == first.id
       assert refetched.provider_media_id == "provider-media-id-2"
+    end
+
+    test "put_asset/1 recovers the winning row when a concurrent insert wins the unique-constraint race",
+         attrs do
+      source_url = "https://example.com/media/race.jpg"
+
+      loser_attrs =
+        Map.merge(attrs, %{
+          provider: "swiftchat",
+          source_url: source_url,
+          content_sha256: @sha256_a,
+          provider_media_id: "provider-media-id-loser"
+        })
+
+      winner_attrs = Map.put(loser_attrs, :provider_media_id, "provider-media-id-winner")
+
+      test_pid = self()
+
+      # Simulates the sibling resolver that wins the upload-on-miss race
+      # (ADR-017): a genuinely separate, real, auto-committing connection
+      # (`sandbox: false` — NOT the shared sandboxed transaction the rest of
+      # this test uses) inserts the winning row and holds its transaction
+      # open until told to commit. Because it stays uncommitted, this row is
+      # invisible (READ COMMITTED) to `put_asset/1`'s own
+      # `fetch_by_content/3` pre-check no matter when that check runs, so
+      # `put_asset/1` is guaranteed to attempt its own `INSERT` — which then
+      # either blocks on this transaction's row lock or (once released)
+      # fails outright with the real
+      # `provider_media_assets_org_provider_url_hash_index` unique
+      # constraint violation, exactly like two concurrent BEAM nodes would
+      # race in production.
+      winner_task =
+        Task.async(fn ->
+          :ok = Sandbox.checkout(Repo, sandbox: false)
+
+          Repo.transaction(fn ->
+            {:ok, winner} = MediaAssets.create_provider_media_asset(winner_attrs)
+            send(test_pid, {:winner_inserted, winner})
+
+            receive do
+              :commit -> winner
+            after
+              5_000 -> raise "winner_task timed out waiting for the commit signal"
+            end
+          end)
+        end)
+
+      receive do
+        {:winner_inserted, _winner} -> :ok
+      after
+        5_000 -> flunk("winner_task's insert never happened")
+      end
+
+      # Registered immediately, BEFORE any assertion below can fail: the
+      # winner row was committed on a real, non-sandboxed connection, so it
+      # survives this test's own sandbox rollback and must be deleted
+      # explicitly regardless of how the rest of the test turns out.
+      on_exit(fn ->
+        :ok = Sandbox.checkout(Repo, sandbox: false)
+
+        # `skip_organization_id: true` is safe/required here: the on_exit
+        # handler runs in its own process with no org set in its process
+        # dictionary, and this is purely test-cleanup for a row that was
+        # deliberately committed outside the sandbox rollback above (not
+        # app runtime code, not reachable from any request/worker path).
+        Repo.delete_all(
+          from(a in ProviderMediaAsset,
+            where: a.source_url == ^source_url and a.content_sha256 == ^@sha256_a
+          ),
+          skip_organization_id: true
+        )
+
+        Sandbox.checkin(Repo)
+      end)
+
+      put_task =
+        Task.async(fn ->
+          Repo.put_organization_id(attrs.organization_id)
+          MediaAssets.put_asset(loser_attrs)
+        end)
+
+      # Bounded synchronization, not a retry-poll: gives `put_task` room to
+      # issue its own `fetch_by_content/3` SELECT (a single fast local
+      # round trip) before the winner's row becomes visible. The miss
+      # itself does not depend on this delay — an uncommitted row is never
+      # visible under READ COMMITTED regardless of timing — this only
+      # protects against the winner committing before `put_task` has even
+      # issued that first query.
+      Process.sleep(200)
+      send(winner_task.pid, :commit)
+
+      assert {:ok, winner} = Task.await(winner_task, 5_000)
+      assert {:ok, recovered} = Task.await(put_task, 5_000)
+
+      assert recovered.id == winner.id
+      assert recovered.provider_media_id == "provider-media-id-winner"
     end
 
     test "invalidate/3 deletes the cached mapping", attrs do
