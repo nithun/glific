@@ -221,6 +221,72 @@ defmodule Glific.Providers.Swiftchat.ApiClient do
   end
 
   @doc """
+  Fetches a single SwiftChat template by name (F-114).
+
+  Path confirmed live: `GET {URL}/merchants/{Merchant-ID}/templates/{Template-Name}`
+  with Bearer `{API-Key}` auth, returning `200` with
+  `{"template": {"type": "text", "text": {"body": "..."}}, "status": "...",
+  "status_reason": ..., "created_at": "..."}`.
+
+  Unlike `list_templates/1` — whose LIST response was live-verified (F-114)
+  to carry ONLY `name`/`type`/`status`/`created_at`/`status_reason`, no
+  `body` — this single-template call is what actually returns the body.
+  `Swiftchat.Template.import_dashboard_template/3` (T-04 pull-sync) calls
+  this for every dashboard-created template not yet known to Glific, since
+  the LIST pass alone cannot build a valid `SessionTemplate` (a text
+  template with no body fails `SessionTemplate.changeset/2`'s
+  `validate_body/2`).
+
+  `template_name` is validated against SwiftChat's documented name charset
+  (`[a-z0-9_]{1,50}`, `\\A`/`\\z`-anchored per L-027) before being
+  interpolated into the URL — same defensive-boundary discipline as
+  `get_media_url/2`'s media-id segment (L-024); template names here
+  originate from SwiftChat's own list response rather than an unsigned
+  webhook, but validating before building an authenticated URL costs
+  nothing and closes off the same vector class regardless of source.
+  """
+  @spec get_template(non_neg_integer(), String.t()) :: Tesla.Env.result() | {:error, String.t()}
+  def get_template(org_id, template_name) do
+    with {:ok, safe_name} <- validate_template_name(template_name),
+         {:ok, credentials} <- get_credentials(org_id) do
+      url =
+        @swiftchat_url <>
+          "/merchants/" <>
+          credentials.merchant_id <>
+          "/templates/" <>
+          safe_name
+
+      swiftchat_get(url, credentials.api_key)
+    end
+  end
+
+  # SwiftChat template-name constraint per the official docs: [a-z0-9_]{1,50}.
+  # `\A`/`\z` (not `^`/`$`) per L-027 — in PCRE, `$` matches immediately
+  # before a trailing newline, so `^...$` would let e.g. "abc\n" through.
+  @template_name_pattern ~r/\A[a-z0-9_]{1,50}\z/
+
+  @spec validate_template_name(term()) :: {:ok, String.t()} | {:error, String.t()}
+  defp validate_template_name(name) when is_binary(name) do
+    if Regex.match?(@template_name_pattern, name) do
+      {:ok, name}
+    else
+      reject_template_name(name)
+    end
+  end
+
+  defp validate_template_name(name), do: reject_template_name(name)
+
+  @spec reject_template_name(term()) :: {:error, String.t()}
+  defp reject_template_name(name) do
+    Glific.log_error(
+      "SwiftChat: rejected non-conforming template name before single-template GET — " <>
+        Glific.SafeLog.safe_inspect(name)
+    )
+
+    {:error, "Invalid SwiftChat template name"}
+  end
+
+  @doc """
   Deletes a SwiftChat template by name.
 
   Path confirmed: `DELETE {URL}/merchants/{Merchant-ID}/templates/{Template-Name}`

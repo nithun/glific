@@ -30,6 +30,14 @@ defmodule Glific.Providers.Swiftchat.Template do
   remain unimplemented — out of PRD-002's F-1-F-5 scope (T-06); their error
   messages name each operation explicitly rather than referring to a
   now-stale "phase 1 has no template API" framing.
+
+  **F-114 (2026-08-14)**: the T-04 pull-sync import path originally built
+  a `SessionTemplate` directly from the LIST response
+  (`ApiClient.list_templates/1`), which was live-verified to carry NO
+  `body` field — every dashboard-created template failed to import and the
+  hourly cron logged the failure forever. Fixed by fetching each
+  not-yet-known template individually (`ApiClient.get_template/2`) for its
+  body before inserting. See `import_dashboard_template/3`'s doc.
   """
 
   @behaviour Glific.Providers.TemplateBehaviour
@@ -410,10 +418,114 @@ defmodule Glific.Providers.Swiftchat.Template do
 
   # -- T-04: pull sync of dashboard-created templates -----------------
 
-  @doc false
+  @doc """
+  Imports a dashboard-created template not yet known to Glific.
+
+  **F-114 fix**: the LIST response (`ApiClient.list_templates/1`) was
+  live-verified to carry ONLY `name`/`type`/`status`/`created_at`/
+  `status_reason` — NO `body`. Building a `SessionTemplate` straight from
+  the list entry therefore always failed `validate_body/2` ("Non-media
+  messages should have a body") the moment `cast/3` normalized the
+  fallback `""` body to `nil` — the hourly cron logged this error forever
+  for every dashboard-created template, and the T-04 unit tests were
+  mocked-green only because their fixtures included a body the real API
+  never sends (GL-002). The fix: fetch the single template
+  (`ApiClient.get_template/2`, `GET /merchants/{id}/templates/{name}`),
+  which DOES return the body, and derive `number_parameters` from the
+  body's own placeholders rather than trusting a list-response field that
+  doesn't exist.
+  """
   @spec import_dashboard_template(non_neg_integer(), Partners.Organization.t(), map()) :: :ok
   def import_dashboard_template(org_id, organization, entry) do
-    body = get_in(entry, ["template", "text", "body"]) || entry["body"] || ""
+    name = entry["name"]
+
+    case fetch_dashboard_template_body(org_id, name) do
+      {:ok, body} ->
+        insert_dashboard_template(org_id, organization, entry, body)
+
+      :skip_non_text ->
+        # Import remains text-only per ADR-005's scope — a non-text
+        # dashboard template is skipped (not crashed), same as today's
+        # behavior for other unmappable types elsewhere in this pipeline.
+        Logger.error(
+          "SwiftChat pull-sync: skipping dashboard template '#{name}' — non-text template " <>
+            "type, text-only in this phase (ADR-005)"
+        )
+
+        :ok
+
+      {:error, reason} ->
+        # Single-fetch failed (non-200/network) — skip this template THIS
+        # cycle only; no partial row is created. The next hourly cron
+        # (Glific.Jobs.MinuteWorker's "update_hsms" branch) retries
+        # naturally on the next poll, since no local row was created to
+        # short-circuit the retry.
+        Logger.warning(
+          "SwiftChat pull-sync: skipping dashboard template '#{name}' this cycle — " <>
+            "single-template fetch failed, will retry next hourly cron: " <>
+            Glific.SafeLog.safe_inspect(reason)
+        )
+
+        :ok
+    end
+  end
+
+  # Fetches the single-template body for a dashboard-created template
+  # (F-114). Returns `{:ok, body}` for a text template, `:skip_non_text`
+  # for any other confirmed type (ADR-005 scope), or `{:error, reason}` on
+  # a non-200/network failure.
+  @spec fetch_dashboard_template_body(non_neg_integer(), String.t() | nil) ::
+          {:ok, String.t()} | :skip_non_text | {:error, any()}
+  defp fetch_dashboard_template_body(org_id, name) do
+    case ApiClient.get_template(org_id, name) do
+      {:ok, %Tesla.Env{status: 200, body: body}} ->
+        decode_single_template_body(body)
+
+      {:ok, %Tesla.Env{status: status, body: body}} ->
+        {:error, "status #{status}: #{Glific.SafeLog.safe_inspect(body)}"}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  # ApiClient uses Tesla.Middleware.JSON, so a JSON response body normally
+  # arrives already decoded (a map); tolerate a raw string body defensively
+  # (mirrors `decode_list_body/1`'s same defensiveness for the list call).
+  @spec decode_single_template_body(any()) ::
+          {:ok, String.t()} | :skip_non_text | {:error, any()}
+  defp decode_single_template_body(body) when is_map(body), do: extract_text_body(body)
+
+  defp decode_single_template_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> extract_text_body(decoded)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp decode_single_template_body(body),
+    do:
+      {:error, "unexpected single-template response shape: #{Glific.SafeLog.safe_inspect(body)}"}
+
+  # Confirmed live shape (F-114):
+  # {"template": {"type": "text", "text": {"body": "..."}}, "status": ..., ...}
+  @spec extract_text_body(map()) :: {:ok, String.t()} | :skip_non_text | {:error, String.t()}
+  defp extract_text_body(%{"template" => %{"type" => "text", "text" => %{"body" => body}}})
+       when is_binary(body),
+       do: {:ok, body}
+
+  defp extract_text_body(%{"template" => %{"type" => _other_type}}), do: :skip_non_text
+
+  defp extract_text_body(_decoded),
+    do: {:error, "single-template response missing template.text.body"}
+
+  @spec insert_dashboard_template(
+          non_neg_integer(),
+          Partners.Organization.t(),
+          map(),
+          String.t()
+        ) :: :ok
+  defp insert_dashboard_template(org_id, organization, entry, body) do
     glific_body = swiftchat_vars_to_glific(body)
     name = entry["name"]
 
@@ -427,7 +539,7 @@ defmodule Glific.Providers.Swiftchat.Template do
       status: map_bsp_status(entry["status"]),
       is_active: map_bsp_status(entry["status"]) == "APPROVED",
       reason: entry["status_reason"],
-      number_parameters: swiftchat_parameters_count(body),
+      number_parameters: max_positional_parameter(body),
       # SwiftChat's list response carries no language field per the
       # confirmed shape — default to the org's default language (matching
       # Gupshup's existing fallback pattern, templates.ex:509). Known gap
@@ -452,6 +564,27 @@ defmodule Glific.Providers.Swiftchat.Template do
         :ok
     end
   end
+
+  @doc """
+  Derives `number_parameters` from the MAX positional placeholder `{N}`
+  found in a SwiftChat template body (F-114) — deliberately the max, not a
+  count of unique placeholders, so numbering matches SwiftChat's own `{N}`
+  rather than Glific's occurrence count (e.g. a body using only `{1}` and
+  `{3}` reports 3). Returns 0 when the body has no placeholders. Public so
+  the unit tests can exercise it directly.
+  """
+  @spec max_positional_parameter(String.t()) :: non_neg_integer()
+  def max_positional_parameter(body) when is_binary(body) do
+    ~r/\{(\d+)\}/
+    |> Regex.scan(body)
+    |> Enum.map(fn [_full, n] -> String.to_integer(n) end)
+    |> case do
+      [] -> 0
+      numbers -> Enum.max(numbers)
+    end
+  end
+
+  def max_positional_parameter(_body), do: 0
 
   # -- T-05: delete/2 (real BSP-side delete) ---------------------------
 

@@ -96,6 +96,23 @@ defmodule Glific.Providers.Swiftchat.TemplateTest do
       assert Template.swiftchat_parameters_count("Hi {1}, {1} again") == 1
       assert Template.swiftchat_parameters_count("No variables here") == 0
     end
+
+    test "max_positional_parameter/1 (F-114) derives the MAX placeholder number, matching the " <>
+           "live F-083 body Hello {1}, ... Ref: {2}. -> 2" do
+      assert Template.max_positional_parameter("Hello {1}, ... Ref: {2}.") == 2
+    end
+
+    test "max_positional_parameter/1 returns 0 for a body with no placeholders" do
+      assert Template.max_positional_parameter("No variables here") == 0
+    end
+
+    test "max_positional_parameter/1 returns the max even when a middle number is skipped" do
+      assert Template.max_positional_parameter("Hi {1}, ref {3}") == 3
+    end
+
+    test "max_positional_parameter/1 is unaffected by repeated placeholders" do
+      assert Template.max_positional_parameter("Hi {1}, {1} again, then {2}") == 2
+    end
   end
 
   describe "map_bsp_status/1 (defensive status mapping, T-01 decision)" do
@@ -515,26 +532,47 @@ defmodule Glific.Providers.Swiftchat.TemplateTest do
       assert updated.status == "APPROVED"
     end
 
-    test "pull-sync (T-04): a dashboard-created template with no local row is imported",
+    test "pull-sync (T-04/F-114): a dashboard-created template with no local row is imported " <>
+           "end-to-end (list has no body -> single-fetch supplies it -> row created)",
          %{organization_id: organization_id} do
-      Tesla.Mock.mock(fn %{method: :get} ->
-        %Tesla.Env{
-          status: 200,
-          body:
-            Jason.encode!(%{
-              "data" => [
-                %{
-                  "name" => "dashboard_only_template",
+      Tesla.Mock.mock(fn %{method: :get, url: url} ->
+        if String.ends_with?(url, "/templates/dashboard_only_template") do
+          # F-114: single-template GET DOES carry the body — the live-verified
+          # shape this fix relies on.
+          %Tesla.Env{
+            status: 200,
+            body:
+              Jason.encode!(%{
+                "template" => %{
                   "type" => "text",
-                  "status" => "ACTIVE",
-                  "template" => %{
+                  "text" => %{"body" => "Hi {1}, your code is {2}."}
+                },
+                "status" => "PENDING_REVIEW",
+                "status_reason" => nil,
+                "created_at" => "2026-08-14T05:30:00Z"
+              })
+          }
+        else
+          # F-114 regression pin: the LIST response carries NO `body`/
+          # `template` field at all — this is the live-verified shape
+          # (name/type/status/created_at/status_reason only). Do NOT add a
+          # body/template key back here; the whole point of this test is
+          # to prove the import path survives a body-less list entry.
+          %Tesla.Env{
+            status: 200,
+            body:
+              Jason.encode!(%{
+                "data" => [
+                  %{
+                    "name" => "dashboard_only_template",
                     "type" => "text",
-                    "text" => %{"body" => "Hi {1}, your code is {2}."}
+                    "status" => "ACTIVE",
+                    "created_at" => "2026-08-14T05:00:00Z"
                   }
-                }
-              ]
-            })
-        }
+                ]
+              })
+          }
+        end
       end)
 
       refute Repo.get_by(SessionTemplate,
@@ -555,11 +593,103 @@ defmodule Glific.Providers.Swiftchat.TemplateTest do
       assert imported.body == "Hi {{1}}, your code is {{2}}."
       assert imported.number_parameters == 2
       assert imported.is_hsm == true
+      # status/is_active still come from the LIST entry's "status" field,
+      # unaffected by the single-fetch (which reports "PENDING_REVIEW" —
+      # only the body/number_parameters come from the single fetch).
       assert imported.status == "APPROVED"
       assert imported.is_active == true
 
       organization = Partners.organization(organization_id)
       assert imported.language_id == organization.default_language_id
+    end
+
+    test "pull-sync (F-114): single-template fetch failing (non-200) skips the template " <>
+           "this cycle, no partial row, no crash",
+         %{organization_id: organization_id} do
+      Tesla.Mock.mock(fn %{method: :get, url: url} ->
+        if String.ends_with?(url, "/templates/fetch_fails_template") do
+          %Tesla.Env{status: 500, body: "boom"}
+        else
+          %Tesla.Env{
+            status: 200,
+            body:
+              Jason.encode!(%{
+                "data" => [
+                  %{"name" => "fetch_fails_template", "type" => "text", "status" => "ACTIVE"}
+                ]
+              })
+          }
+        end
+      end)
+
+      assert :ok = Template.update_hsm_templates(organization_id)
+
+      refute Repo.get_by(SessionTemplate,
+               bsp_id: "fetch_fails_template",
+               organization_id: organization_id
+             )
+    end
+
+    test "pull-sync (F-114): single-template fetch network error skips the template " <>
+           "this cycle, no partial row, no crash",
+         %{organization_id: organization_id} do
+      Tesla.Mock.mock(fn %{method: :get, url: url} ->
+        if String.ends_with?(url, "/templates/network_fail_template") do
+          {:error, :timeout}
+        else
+          %Tesla.Env{
+            status: 200,
+            body:
+              Jason.encode!(%{
+                "data" => [
+                  %{"name" => "network_fail_template", "type" => "text", "status" => "ACTIVE"}
+                ]
+              })
+          }
+        end
+      end)
+
+      assert :ok = Template.update_hsm_templates(organization_id)
+
+      refute Repo.get_by(SessionTemplate,
+               bsp_id: "network_fail_template",
+               organization_id: organization_id
+             )
+    end
+
+    test "pull-sync (F-114): a non-text single-template response is skipped (ADR-005 " <>
+           "text-only scope), not crashed",
+         %{organization_id: organization_id} do
+      Tesla.Mock.mock(fn %{method: :get, url: url} ->
+        if String.ends_with?(url, "/templates/image_dashboard_template") do
+          %Tesla.Env{
+            status: 200,
+            body:
+              Jason.encode!(%{
+                "template" => %{"type" => "image"},
+                "status" => "ACTIVE",
+                "status_reason" => nil
+              })
+          }
+        else
+          %Tesla.Env{
+            status: 200,
+            body:
+              Jason.encode!(%{
+                "data" => [
+                  %{"name" => "image_dashboard_template", "type" => "image", "status" => "ACTIVE"}
+                ]
+              })
+          }
+        end
+      end)
+
+      assert :ok = Template.update_hsm_templates(organization_id)
+
+      refute Repo.get_by(SessionTemplate,
+               bsp_id: "image_dashboard_template",
+               organization_id: organization_id
+             )
     end
 
     test "pull-sync: a Glific-submitted template (already has a matching bsp_id) is never duplicated",

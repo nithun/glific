@@ -231,6 +231,105 @@ defmodule Glific.Providers.Swiftchat.ApiClientTest do
     end
   end
 
+  describe "get_template/2 (F-114: single-template GET for pull-sync body)" do
+    test "resolves the merchant-scoped single-template endpoint with a Bearer token header",
+         attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn
+        %{method: :get, url: url, headers: headers} ->
+          assert url ==
+                   "https://v1-api.swiftchat.ai/api/merchants/test_merchant_id/templates/order_confirmation"
+
+          assert {"authorization", "Bearer test_swiftchat_api_key"} in headers
+
+          %Tesla.Env{
+            status: 200,
+            body:
+              Jason.encode!(%{
+                "template" => %{"type" => "text", "text" => %{"body" => "Hi {1}."}},
+                "status" => "PENDING_REVIEW",
+                "status_reason" => nil
+              })
+          }
+      end)
+
+      assert {:ok, %Tesla.Env{status: 200}} =
+               ApiClient.get_template(attrs.organization_id, "order_confirmation")
+    end
+
+    test "returns a credential error when no swiftchat credential is active", attrs do
+      assert {:error, error_msg} =
+               ApiClient.get_template(attrs.organization_id, "order_confirmation")
+
+      assert error_msg =~ "API Key and Bot ID"
+    end
+
+    test "rejects a non-conforming template name before ever calling the BSP", attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn _env ->
+        flunk("BSP should not have been called with a non-conforming template name")
+      end)
+
+      assert {:error, error_msg} =
+               ApiClient.get_template(
+                 attrs.organization_id,
+                 "../../merchants/other-merchant/templates"
+               )
+
+      assert error_msg =~ "Invalid SwiftChat template name"
+    end
+
+    test "rejects an uppercase/invalid-charset template name before calling the BSP", attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn _env ->
+        flunk("BSP should not have been called with an invalid-charset template name")
+      end)
+
+      assert {:error, error_msg} = ApiClient.get_template(attrs.organization_id, "Invalid Name!")
+
+      assert error_msg =~ "Invalid SwiftChat template name"
+    end
+
+    test "rejects a non-binary template name without raising", attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn _env ->
+        flunk("BSP should not have been called with a non-binary template name")
+      end)
+
+      assert {:error, error_msg} = ApiClient.get_template(attrs.organization_id, nil)
+
+      assert error_msg =~ "Invalid SwiftChat template name"
+    end
+
+    test "rejects a template name with a trailing newline (`\\z`, not `$`, per L-027)", attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn _env ->
+        flunk("BSP should not have been called with a template name carrying a trailing newline")
+      end)
+
+      assert {:error, error_msg} =
+               ApiClient.get_template(attrs.organization_id, "order_confirmation\n")
+
+      assert error_msg =~ "Invalid SwiftChat template name"
+    end
+
+    test "propagates a non-200 response for the caller to handle (e.g. skip-and-retry)", attrs do
+      :ok = activate_swiftchat(attrs.organization_id)
+
+      Tesla.Mock.mock(fn %{method: :get} ->
+        %Tesla.Env{status: 404, body: Jason.encode!(%{"code" => 118})}
+      end)
+
+      assert {:ok, %Tesla.Env{status: 404}} =
+               ApiClient.get_template(attrs.organization_id, "missing_template")
+    end
+  end
+
   describe "upload_media/3 and delete_media/2 (ADR-017 T21)" do
     test "posts a multipart body with type + file fields and returns the provider media id",
          attrs do
