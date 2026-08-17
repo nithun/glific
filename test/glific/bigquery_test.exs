@@ -13,7 +13,9 @@ defmodule Glific.BigQueryTest do
     Contacts.Contact,
     Flows.FlowResult,
     Partners,
+    Partners.Saas,
     Repo,
+    RepoReplica,
     Seeds.SeedsDev
   }
 
@@ -238,14 +240,15 @@ defmodule Glific.BigQueryTest do
     job_table2 = Glific.Jobs.get_bigquery_job(attrs.organization_id, "messages")
     assert job_table2.table_id > job_table1.table_id
 
-    assert_raise RuntimeError, fn ->
-      BigQuery.handle_insert_query_response(
-        {:ok, %{insertErrors: %{error: "Some errors"}}},
-        attrs.organization_id,
-        table: "messages",
-        max_id: 10
-      )
-    end
+    # Incident #274: insertErrors used to raise and crash-loop the Oban job. It is now
+    # logged (see Glific.log_error/2) and the function falls through to its :ok return.
+    assert :ok ==
+             BigQuery.handle_insert_query_response(
+               {:ok, %{insertErrors: %{error: "Some errors"}}},
+               attrs.organization_id,
+               table: "messages",
+               max_id: 10
+             )
 
     assert :ok ==
              BigQuery.handle_insert_query_response(
@@ -254,6 +257,58 @@ defmodule Glific.BigQueryTest do
                table: "messages",
                max_id: nil
              )
+  end
+
+  test "make_insert_query/4 does not raise when BigQuery reports insertErrors (regression for incident #274)",
+       %{organization_id: org_id} do
+    with_mocks([
+      {
+        Goth.Token,
+        [:passthrough],
+        [
+          fetch: fn _url ->
+            {:ok, %{token: "0xFAKETOKEN_Q=", expires: System.system_time(:second) + 120}}
+          end
+        ]
+      }
+    ]) do
+      url =
+        "https://bigquery.googleapis.com/bigquery/v2/projects/DEFAULTPROJECTID/datasets/917834811114/tables/messages/insertAll"
+
+      Tesla.Mock.mock(fn
+        %Tesla.Env{method: :post, url: ^url} ->
+          %Tesla.Env{
+            status: 200,
+            body:
+              Poison.encode!(%GoogleApi.BigQuery.V2.Model.TableDataInsertAllResponse{
+                kind: "bigquery#tableDataInsertAllResponse",
+                insertErrors: [
+                  %GoogleApi.BigQuery.V2.Model.TableDataInsertAllResponseInsertErrors{
+                    index: 0,
+                    errors: [
+                      %GoogleApi.BigQuery.V2.Model.ErrorProto{
+                        reason: "invalid",
+                        message: "Malformed row: missing required field"
+                      }
+                    ]
+                  }
+                ]
+              })
+          }
+      end)
+
+      # Previously (pre-incident-274-fix) this call raised a RuntimeError from inside
+      # handle_insert_query_response/3 and never returned, crash-looping the Oban job
+      # that called it. Now it should complete normally and return :ok.
+      assert :ok ==
+               BigQuery.make_insert_query(
+                 [%{json: %{id: 1, name: "test"}}],
+                 "messages",
+                 org_id,
+                 max_id: 10,
+                 last_updated_at: nil
+               )
+    end
   end
 
   test "handle_sync_errors/2 return ok atom when status is not ALREADY_EXISTS", attrs do
@@ -473,6 +528,55 @@ defmodule Glific.BigQueryTest do
     # There are cases where we get date as a iso date only type, so handling that too
     assert "#{String.split(@formatted_time, " ") |> List.first()} 00:00:00" ==
              BigQuery.format_date(DateTime.to_date(datetime) |> to_string, attrs.organization_id)
+  end
+
+  test "make_job/4 forwards the real action, not \"unknown\"" do
+    # Drives make_job -> make_insert_query -> handle_insert_query_response -> record so a
+    # regression in forwarding :action is caught. Asserting on handle_insert_query_response
+    # alone cannot see this — the action is dropped upstream of it.
+    #
+    # Mocks our own Instrumentation module rather than Appsignal: Appsignal is called from
+    # every module in the app, so mocking it globally leaks into unrelated tests.
+    parent = self()
+
+    with_mocks([
+      {Goth.Token, [:passthrough],
+       [
+         fetch: fn _ ->
+           {:ok, %{token: "0xFAKETOKEN_Q=", expires: System.system_time(:second) + 120}}
+         end
+       ]},
+      {Glific.BigQuery.Instrumentation, [:passthrough],
+       [
+         record: fn table, status, action, organization_id ->
+           send(parent, {:record, table, status, action, organization_id})
+           :ok
+         end
+       ]}
+    ]) do
+      Tesla.Mock.mock(fn %Tesla.Env{method: :post} ->
+        %Tesla.Env{
+          status: 200,
+          body:
+            Poison.encode!(%GoogleApi.BigQuery.V2.Model.TableDataInsertAllResponse{
+              kind: "bigquery#tableDataInsertAllResponse",
+              insertErrors: nil
+            })
+        }
+      end)
+
+      BigQueryWorker.make_job([%{json: %{id: 1}}], :contacts, 1, %{
+        action: :update,
+        max_id: nil,
+        last_updated_at: DateTime.utc_now()
+      })
+
+      assert_receive {:record, "contacts", :success, :update, 1}
+
+      # The invariant is exactly one increment per job — assert_receive alone would pass
+      # with a duplicate success counter still sitting in the mailbox.
+      refute_received {:record, _, _, _, _}
+    end
   end
 
   test "queue_table_data/3 should process and queue data correctly", %{organization_id: org_id} do
@@ -819,6 +923,52 @@ defmodule Glific.BigQueryTest do
         Repo.preload(group, [:wa_managed_phone, wa_groups_phones: :wa_managed_phone])
 
       assert BigQueryWorker.primary_wa_phone(group_with_preloads) == phone.phone
+    end
+  end
+
+  describe "organizations BigQuery serialization" do
+    test "organization_schema/0 includes the curated fields and excludes PII/secrets" do
+      field_names = Schema.organization_schema() |> Enum.map(& &1.name)
+
+      for expected <- ~w(id name shortcode status is_active is_approved is_suspended
+                         suspended_until is_trial_org trial_expiration_date deleted_at
+                         inserted_at updated_at) do
+        assert expected in field_names
+      end
+
+      for excluded <- ~w(email team_emails signature_phrase setting fields last_communication_at) do
+        refute excluded in field_names
+      end
+    end
+
+    test "organizations is registered only for the SaaS org" do
+      saas_tables = BigQuery.bigquery_tables(Saas.organization_id())
+      assert Map.has_key?(saas_tables, "organizations")
+
+      other_tables = BigQuery.bigquery_tables(Saas.organization_id() + 1)
+      refute Map.has_key?(other_tables, "organizations")
+    end
+
+    test "organizations is synced on updates and never deduped" do
+      # It must stay OUT of ignore_updates_for_table/0 so the update pass re-syncs changed
+      # orgs, and OUT of the dedup list so those re-syncs accumulate as a change log
+      # rather than collapsing to one row per org.
+      refute "organizations" in BigQuery.ignore_updates_for_table()
+    end
+
+    test "fetch_data/3 for organizations returns every org, not just the current process organization_id",
+         %{organization_id: organization_id} do
+      other_organization = organization_fixture()
+
+      Repo.put_process_state(organization_id)
+      RepoReplica.put_process_state(organization_id)
+
+      organization_ids =
+        BigQueryWorker.fetch_data("organizations", organization_id, %{})
+        |> Enum.map(& &1.id)
+
+      assert organization_id in organization_ids
+      assert other_organization.id in organization_ids
     end
   end
 end

@@ -1584,6 +1584,7 @@ defmodule Glific.PartnersTest do
       assert organization_services[organization_id]["dialogflow"] == false
       assert organization_services[organization_id]["fun_with_flags"] == true
       assert organization_services[organization_id]["google_cloud_storage"] == false
+      assert organization_services[organization_id]["maytapi"] == false
 
       valid_attrs = %{
         secrets: %{"service_account" => @default_goth_json},
@@ -1923,6 +1924,86 @@ defmodule Glific.PartnersTest do
 
     test "returns empty list when no orgs have a disabled credential" do
       assert [] == Partners.list_orgs_with_disabled_credential("bigquery")
+    end
+  end
+
+  describe "enable_credential/2" do
+    test "re-enables a disabled bigquery credential and triggers BQ sync",
+         %{organization_id: organization_id} do
+      {:ok, provider} = Repo.fetch_by(Provider, %{shortcode: "bigquery"})
+
+      {:ok, _} =
+        %Credential{}
+        |> Credential.changeset(%{
+          secrets: %{"service_account" => Jason.encode!(%{"project_id" => "test"})},
+          provider_id: provider.id,
+          organization_id: organization_id,
+          is_active: false
+        })
+        |> Repo.insert()
+
+      with_mock(Glific.BigQuery, [:passthrough],
+        sync_schema_with_bigquery: fn _org_id -> {:ok, "Refreshing Bigquery Schema"} end
+      ) do
+        assert :ok = Partners.enable_credential(organization_id, "bigquery")
+
+        {:ok, credential} =
+          Repo.fetch_by(Credential, %{provider_id: provider.id, organization_id: organization_id})
+
+        assert credential.is_active == true
+      end
+    end
+
+    test "re-disables credential when BQ sync callback fails",
+         %{organization_id: organization_id} do
+      {:ok, provider} = Repo.fetch_by(Provider, %{shortcode: "bigquery"})
+
+      {:ok, _} =
+        %Credential{}
+        |> Credential.changeset(%{
+          secrets: %{"service_account" => Jason.encode!(%{"project_id" => "test"})},
+          provider_id: provider.id,
+          organization_id: organization_id,
+          is_active: false
+        })
+        |> Repo.insert()
+
+      with_mock(Glific.BigQuery, [:passthrough],
+        sync_schema_with_bigquery: fn _org_id -> {:error, "BQ permission denied"} end
+      ) do
+        assert :ok = Partners.enable_credential(organization_id, "bigquery")
+
+        {:ok, credential} =
+          Repo.fetch_by(Credential, %{provider_id: provider.id, organization_id: organization_id})
+
+        assert credential.is_active == false
+      end
+    end
+
+    test "returns ok even when GCS callback fails (sync will re-disable on next attempt)",
+         %{organization_id: organization_id} do
+      {:ok, provider} = Repo.fetch_by(Provider, %{shortcode: "google_cloud_storage"})
+
+      {:ok, _} =
+        %Credential{}
+        |> Credential.changeset(%{
+          secrets: %{},
+          provider_id: provider.id,
+          organization_id: organization_id,
+          is_active: false
+        })
+        |> Repo.insert()
+
+      with_mock(Glific.GCS, [:passthrough],
+        refresh_gcs_setup: fn _org_id -> {:error, "GCS permission denied"} end
+      ) do
+        assert :ok = Partners.enable_credential(organization_id, "google_cloud_storage")
+      end
+    end
+
+    test "returns error for an invalid shortcode",
+         %{organization_id: organization_id} do
+      assert {:error, _} = Partners.enable_credential(organization_id, "nonexistent_provider")
     end
   end
 

@@ -254,6 +254,14 @@ defmodule Glific.Providers.Swiftchat.Template do
   def edit_approved_template(_template_id, _params),
     do: {:error, String.replace(@unimplemented_ops, "%{op}", "edit-approved-template")}
 
+  @doc """
+  Not implemented — SwiftChat has no Meta Template Library equivalent
+  (upstream `feat: add template library feature flag and GraphQL support`,
+  #5534, added this callback for Gupshup only).
+  """
+  @spec search_library_templates(non_neg_integer()) :: {:ok, list(map())} | {:error, String.t()}
+  def search_library_templates(_organization_id), do: {:error, "Feature not available"}
+
   # -- T-03/T-04: update_hsm_templates/1 (status poll + pull sync) -------
 
   @doc """

@@ -19,11 +19,11 @@ defmodule GlificWeb.Schema.AssistantTypes do
     field :name, :string
 
     field :files, list_of(:file_info) do
-      resolve(&Resolvers.Filesearch.list_files/3)
+      resolve(&Resolvers.Assistants.list_files/3)
     end
 
     field :size, :string do
-      resolve(&Resolvers.Filesearch.calculate_vector_store_size/3)
+      resolve(&Resolvers.Assistants.calculate_vector_store_size/3)
     end
 
     field :status, :string
@@ -80,7 +80,7 @@ defmodule GlificWeb.Schema.AssistantTypes do
     field :description, :string
 
     field :vector_store, :vector_store do
-      resolve(&Resolvers.Filesearch.resolve_vector_store/3)
+      resolve(&Resolvers.Assistants.resolve_vector_store/3)
     end
 
     field :inserted_at, :datetime
@@ -106,6 +106,8 @@ defmodule GlificWeb.Schema.AssistantTypes do
     field :model, :string
     field :instructions, :string
     field :temperature, :float
+    field :effort, :string
+    field :settings, :json
     field :status, :string
     field :new_version_in_progress, :boolean
     field :live_version_number, :integer
@@ -114,7 +116,7 @@ defmodule GlificWeb.Schema.AssistantTypes do
     field :active_config_version_id, :id
 
     field :vector_store, :vector_store do
-      resolve(&Resolvers.Filesearch.resolve_vector_store/3)
+      resolve(&Resolvers.Assistants.resolve_vector_store/3)
     end
 
     field :inserted_at, :datetime
@@ -136,6 +138,8 @@ defmodule GlificWeb.Schema.AssistantTypes do
     field :instructions, :string
     field :description, :string
     field :temperature, :float
+    field :effort, :string
+    field :settings, :json
     field :knowledge_base_version_id, :string
   end
 
@@ -179,28 +183,28 @@ defmodule GlificWeb.Schema.AssistantTypes do
     field :updated_at, :datetime
   end
 
-  object :filesearch_mutations do
+  object :assistant_mutations do
     @desc "Upload filesearch file"
     field :upload_filesearch_file, :file_result do
       arg(:media, non_null(:upload))
       arg(:target_format, :string)
       arg(:callback_url, :string)
       middleware(Authorize, :staff)
-      resolve(&Resolvers.Filesearch.upload_file/3)
+      resolve(&Resolvers.Assistants.upload_file/3)
     end
 
     @desc "Create Assistant"
     field :create_assistant, :kaapi_assistant_result do
       arg(:input, :assistant_input)
       middleware(Authorize, :staff)
-      resolve(&Resolvers.Filesearch.create_assistant/3)
+      resolve(&Resolvers.Assistants.create_assistant/3)
     end
 
     @desc "Delete Assistant"
     field :delete_assistant, :kaapi_assistant_result do
       arg(:id, non_null(:id))
       middleware(Authorize, :staff)
-      resolve(&Resolvers.Filesearch.delete_assistant/3)
+      resolve(&Resolvers.Assistants.delete_assistant/3)
     end
 
     @desc "Create a Knowledge Base Version"
@@ -216,7 +220,7 @@ defmodule GlificWeb.Schema.AssistantTypes do
       arg(:input, :assistant_input)
       arg(:id, non_null(:id))
       middleware(Authorize, :staff)
-      resolve(&Resolvers.Filesearch.update_assistant/3)
+      resolve(&Resolvers.Assistants.update_assistant/3)
     end
 
     @desc "Clone an existing Assistant"
@@ -232,16 +236,16 @@ defmodule GlificWeb.Schema.AssistantTypes do
       arg(:assistant_id, non_null(:id))
       arg(:version_id, non_null(:id))
       middleware(Authorize, :staff)
-      resolve(&Resolvers.Filesearch.set_live_version/3)
+      resolve(&Resolvers.Assistants.set_live_version/3)
     end
   end
 
-  object :filesearch_queries do
+  object :assistant_queries do
     @desc "Get Assistant"
     field :assistant, :assistant_result do
       arg(:id, non_null(:id))
       middleware(Authorize, :staff)
-      resolve(&Resolvers.Filesearch.get_assistant/3)
+      resolve(&Resolvers.Assistants.get_assistant/3)
     end
 
     @desc "List Assistants"
@@ -249,7 +253,7 @@ defmodule GlificWeb.Schema.AssistantTypes do
       arg(:filter, :assistant_filter)
       arg(:opts, :opts)
       middleware(Authorize, :staff)
-      resolve(&Resolvers.Filesearch.list_assistants/3)
+      resolve(&Resolvers.Assistants.list_assistants/3)
     end
 
     @desc "List Assistant Config Versions"
@@ -262,20 +266,14 @@ defmodule GlificWeb.Schema.AssistantTypes do
     field :count_assistants, :integer do
       arg(:filter, :assistant_filter)
       middleware(Authorize, :staff)
-      resolve(&Resolvers.Filesearch.count_assistants/3)
-    end
-
-    @desc "List models"
-    field :list_openai_models, list_of(:string) do
-      middleware(Authorize, :staff)
-      resolve(&Resolvers.Filesearch.list_models/3)
+      resolve(&Resolvers.Assistants.count_assistants/3)
     end
 
     @desc "List all config versions for an assistant"
     field :assistant_versions, list_of(:assistant_config_version) do
       arg(:assistant_id, non_null(:id))
       middleware(Authorize, :staff)
-      resolve(&Resolvers.Filesearch.list_assistant_versions/3)
+      resolve(&Resolvers.Assistants.list_assistant_versions/3)
     end
   end
 end

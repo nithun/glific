@@ -638,12 +638,11 @@ defmodule Glific.Erase do
       messages_media
       messages_tags
       notifications
-      openai_assistants
-      openai_vector_stores
       organization_data
       organization_eval_requests
       profiles
       prompt_generation_requests
+      provider_media_assets
       registrations
       role_permissions
       roles
@@ -800,7 +799,7 @@ defmodule Glific.Erase do
     Notifications.create_notification(%{
       category: "Organization",
       message: message,
-      severity: severity,
+      severity: Notifications.types()[severity],
       organization_id: Glific.glific_organization_id(),
       entity: entity
     })

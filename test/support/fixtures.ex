@@ -17,6 +17,8 @@ defmodule Glific.Fixtures do
     AccessControl,
     AccessControl.Permission,
     AccessControl.Role,
+    Assistants.Assistant,
+    Assistants.AssistantConfigVersion,
     Contacts,
     Contacts.ContactsField,
     Extensions.Extension,
@@ -43,6 +45,7 @@ defmodule Glific.Fixtures do
     Notifications.Notification,
     Partners,
     Partners.Billing,
+    Partners.Credential,
     Partners.Organization,
     Partners.Provider,
     Profiles.Profile,
@@ -1193,6 +1196,26 @@ defmodule Glific.Fixtures do
   end
 
   @doc """
+  Generate a wa_group AND seed its primary `wa_groups_phones` membership row.
+  Use this when the test exercises code that routes via the primary
+  membership (e.g. anything that goes through `Maytapi.Message`).
+  """
+  @spec wa_group_with_primary_fixture(map()) :: WAGroup.t()
+  def wa_group_with_primary_fixture(attrs) do
+    wa_group = wa_group_fixture(attrs)
+
+    wa_group_phone_fixture(%{
+      wa_group_id: wa_group.id,
+      wa_managed_phone_id: attrs.wa_managed_phone_id,
+      organization_id: attrs.organization_id,
+      is_primary: true,
+      is_active: true
+    })
+
+    wa_group
+  end
+
+  @doc """
   Generate a wa_group_phone membership row.
   """
   @spec wa_group_phone_fixture(map()) :: WAGroupPhone.t()
@@ -1290,7 +1313,7 @@ defmodule Glific.Fixtures do
     wa_managed_phone = get_wa_managed_phone(attrs.organization_id)
 
     wg1 =
-      wa_group_fixture(%{
+      wa_group_with_primary_fixture(%{
         organization_id: attrs.organization_id,
         wa_managed_phone_id: wa_managed_phone.id
       })
@@ -1396,7 +1419,7 @@ defmodule Glific.Fixtures do
   @spec wa_flow_context_fixture(map()) :: FlowContext.t()
   def wa_flow_context_fixture(attrs \\ %{}) do
     wa_phone = wa_managed_phone_fixture(attrs)
-    wa_group = wa_group_fixture(Map.put(attrs, :wa_managed_phone_id, wa_phone.id))
+    wa_group = wa_group_with_primary_fixture(Map.put(attrs, :wa_managed_phone_id, wa_phone.id))
 
     {:ok, flow_context} =
       attrs
@@ -1408,5 +1431,84 @@ defmodule Glific.Fixtures do
     flow_context
     |> Repo.preload(:wa_group)
     |> Repo.preload(:flow)
+  end
+
+  @doc false
+  @spec kaapi_credential_fixture(map()) :: Credential.t()
+  def kaapi_credential_fixture(attrs) do
+    valid_attrs = %{
+      organization_id: attrs.organization_id,
+      shortcode: "kaapi",
+      keys: %{},
+      secrets: %{"api_key" => Map.get(attrs, :api_key, "sk_test_key")}
+    }
+
+    {:ok, credential} = Partners.create_credential(valid_attrs)
+
+    {:ok, credential} =
+      Partners.update_credential(credential, Map.put(valid_attrs, :is_active, true))
+
+    credential
+  end
+
+  @doc false
+  @spec assistant_fixture(map()) :: Assistant.t()
+  def assistant_fixture(attrs) do
+    valid_attrs = %{
+      name: "Fixture Assistant #{Ecto.UUID.generate()}",
+      organization_id: attrs.organization_id
+    }
+
+    {:ok, assistant} =
+      %Assistant{}
+      |> Assistant.changeset(Map.merge(valid_attrs, attrs))
+      |> Repo.insert()
+
+    assistant
+  end
+
+  @doc false
+  @spec assistant_config_version_fixture(map()) :: AssistantConfigVersion.t()
+  def assistant_config_version_fixture(attrs) do
+    valid_attrs = %{
+      provider: "openai",
+      model: "gpt-4o",
+      prompt: "You are a helpful assistant",
+      settings: %{"temperature" => 1.0},
+      status: :ready
+    }
+
+    {:ok, config_version} =
+      %AssistantConfigVersion{}
+      |> AssistantConfigVersion.changeset(Map.merge(valid_attrs, attrs))
+      |> Repo.insert()
+
+    config_version
+  end
+
+  @doc false
+  @spec live_assistant_fixture(map()) :: Assistant.t()
+  def live_assistant_fixture(attrs) do
+    assistant =
+      assistant_fixture(%{
+        organization_id: attrs.organization_id,
+        kaapi_uuid: Map.get(attrs, :kaapi_uuid, "kaapi_uuid_#{Ecto.UUID.generate()}")
+      })
+
+    config_version =
+      assistant_config_version_fixture(%{
+        assistant_id: assistant.id,
+        organization_id: attrs.organization_id,
+        kaapi_version_number: Map.get(attrs, :kaapi_version_number, 1)
+      })
+
+    {:ok, assistant} =
+      assistant
+      |> Assistant.set_active_config_version_changeset(%{
+        active_config_version_id: config_version.id
+      })
+      |> Repo.update()
+
+    assistant
   end
 end

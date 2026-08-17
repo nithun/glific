@@ -11,7 +11,7 @@ defmodule Glific.MixProject do
   def project do
     [
       app: :glific,
-      version: "8.7.0",
+      version: "8.9.8",
       elixir: "~> 1.18.3",
       elixirc_paths: elixirc_paths(Mix.env()),
       dialyzer: [

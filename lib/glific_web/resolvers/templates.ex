@@ -43,6 +43,17 @@ defmodule GlificWeb.Resolvers.Templates do
     {:ok, Templates.count_session_templates(args)}
   end
 
+  @doc """
+  Browse Meta's pre-approved WhatsApp template library, fetched live from the
+  organization's BSP partner API. Read-only passthrough — does not create any
+  session templates.
+  """
+  @spec template_library(Absinthe.Resolution.t(), map(), %{context: map()}) ::
+          {:ok, list(map())} | {:error, any}
+  def template_library(_, _args, %{context: %{current_user: user}}) do
+    Templates.search_library_templates(user.organization_id)
+  end
+
   @doc false
   @spec create_session_template(Absinthe.Resolution.t(), %{input: map()}, %{context: map()}) ::
           {:ok, any} | {:error, any}
@@ -173,5 +184,15 @@ defmodule GlificWeb.Resolvers.Templates do
       Map.get(attr, :template_id),
       Map.get(attr, :cc, %{})
     )
+  end
+
+  @doc """
+  Translate an HSM draft's body/footer/buttons into the target
+  language, for the "Add new language" flow
+  """
+  @spec translate_session_template(Absinthe.Resolution.t(), map(), %{context: map()}) ::
+          {:ok, map()} | {:error, any}
+  def translate_session_template(_, params, %{context: %{current_user: user}}) do
+    Templates.translate_session_template(params, user.organization_id)
   end
 end

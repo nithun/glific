@@ -25,4 +25,7 @@ defmodule Glific.Providers.TemplateBehaviour do
   # no compile-time warning.
   @callback edit_approved_template(template_id :: integer(), params :: map()) ::
               {:ok, any} | {:error, any}
+
+  @callback search_library_templates(org_id :: non_neg_integer()) ::
+              {:ok, list(map())} | {:error, String.t()}
 end
