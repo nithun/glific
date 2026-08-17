@@ -17,4 +17,11 @@ defmodule Glific.Providers.GupshupEnterprise.TemplateTest do
       assert message =~ "does not support editing"
     end
   end
+
+  describe "search_library_templates/1" do
+    test "returns a clear not-available error rather than crashing (upstream-merge stub)" do
+      assert {:error, message} = Template.search_library_templates(1)
+      assert message =~ "not available"
+    end
+  end
 end

@@ -791,6 +791,11 @@ defmodule Glific.Providers.Swiftchat.TemplateTest do
       assert message =~ "edit-approved-template"
       refute message =~ "phase 1"
     end
+
+    test "search_library_templates/1 returns a clear not-available error (upstream-merge stub)" do
+      assert {:error, message} = Template.search_library_templates(1)
+      assert message =~ "not available"
+    end
   end
 
   describe "Provider.bsp_module(org_id, _) catch-all (unreachable dispatch today)" do
